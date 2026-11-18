@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RepoRunner.Cli/RepoRunner.Cli.csproj" />
+    <Project Path="src/RepoRunner.Core/RepoRunner.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RepoRunner.Tests/RepoRunner.Tests.csproj" />
+  </Folder>
+</Solution>
