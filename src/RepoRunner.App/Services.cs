@@ -74,6 +74,9 @@ public sealed class RunSession
     public required bool Protected { get; init; }
     public required string Labels { get; init; }
     public string? Url { get; init; }
+    /// <summary>What the app is doing, as seen from inside it. Null when recording is off for this run.</summary>
+    public FlowHub? Flows { get; internal set; }
+    public string? Solution { get; init; }
     public DateTime Started { get; } = DateTime.Now;
     public DateTime? Ended { get; internal set; }
     public int? ExitCode { get; internal set; }
@@ -114,6 +117,10 @@ public sealed class SessionManager
         if (All().Any(s => s.Running && s.Repo == repo.Name && s.Target == target.Name))
             throw new VaultException($"{target.Name} is already running. Stop it first.");
 
+        // Recording is for development data only: never for a protected environment.
+        var record = target.Kind == "dotnet" && !env.Protected;
+        FlowHub? hub = null;
+
         var (specs, block, secrets, injected) = vaults.Use(vault =>
         {
             var resolved = vault.Resolve(repo, env, target);
@@ -124,7 +131,9 @@ public sealed class SessionManager
             environment["RR_REPO"] = repo.Name;
             environment["RR_ENV"] = env.Name;
             environment["RR_TARGET"] = target.Name;
-            if (debug) DebugSupport.Apply(environment, repo, target);
+            var secretValues = resolved.SecretNames.Select(n => resolved.Values[n]).ToList();
+            if (record) hub = new FlowHub(secretValues, () => Interlocked.Increment(ref _version));
+            if (debug || record) DebugSupport.Apply(environment, repo, target, waitForDebugger: debug, flowPipe: hub?.PipeName);
             vault.Audit(debug ? "debug" : watch ? "watch" : "run", repo.Name, env.Name, target.Name);
             return (list, environment, resolved.SecretNames.Select(n => resolved.Values[n]).ToList(), resolved.Values.Count);
         });
@@ -137,6 +146,8 @@ public sealed class SessionManager
             Protected = env.Protected,
             Labels = string.Join(" + ", specs.Select(s => s.Label)) + (debug ? " (debug)" : watch ? " (watch)" : ""),
             Url = target.Urls?.Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(),
+            Flows = hub,
+            Solution = target.Kind == "dotnet" ? DebugSupport.FindSolution(repo, target) : null,
         };
         lock (_sessions) _sessions.Add(session);
         session.Append($"Starting {session.Labels} on {env.Name} with {injected} variables from the vault...");
@@ -168,6 +179,7 @@ public sealed class SessionManager
                 session.Append($"Failed: {ex.Message}");
             }
             session.Ended = DateTime.Now;
+            session.Flows?.Dispose(); // stop listening; what was captured stays viewable
             Interlocked.Increment(ref _version);
         });
         return session;

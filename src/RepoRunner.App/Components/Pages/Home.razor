@@ -200,6 +200,17 @@
                                 <span class="pulse"></span>
                             }
                         </button>
+                        <button class="ptab @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">
+                            <Icon Name="flow" /> Flow
+                            @if (FlowList.Count(f => f.Outcome == "failed") is > 0 and var failedFlows)
+                            {
+                                <span class="tab-count bad">@failedFlows</span>
+                            }
+                            else if (FlowList.Count > 0)
+                            {
+                                <span class="tab-count">@FlowList.Count</span>
+                            }
+                        </button>
                         <button class="ptab @(tab == "files" ? "active" : "")" @onclick="@(() => tab = "files")">
                             <Icon Name="file" /> Plaintext files
                             @if (files.Count > 0)
@@ -253,6 +264,164 @@
                                         }
                                     </div>
                                 </div>
+                            }
+                        }
+                        else if (tab == "flow")
+                        {
+                            var flows = FlowList;
+                            var picked = flows.FirstOrDefault(f => f.TraceId == flowId) ?? flows.FirstOrDefault(f => !onlyProblems || f.Outcome != "ok");
+                            @if (flowSession is null)
+                            {
+                                <div class="state">
+                                    <span class="glyph"><Icon Name="flow" Size="22" /></span>
+                                    <h3>See what a feature does, step by step</h3>
+                                    <p>Run a .NET target, then use the app. Each request shows up here as a chain of steps — the request, calls to other services, database commands — with the data passed in and out, and any exception at the line that threw it.</p>
+                                </div>
+                            }
+                            else if (flowSession.Flows is null)
+                            {
+                                <div class="state locked">
+                                    <span class="glyph"><Icon Name="lock" Size="22" /></span>
+                                    <h3>Recording is off for @flowSession.Env</h3>
+                                    <p>Flows carry real request data, so they are never recorded for a protected environment or for non-.NET targets.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="scoreboard">
+                                    <div class="score"><b>@flows.Count</b><span>flows</span></div>
+                                    <div class="score ok"><b>@flows.Count(f => f.Outcome == "ok")</b><span>clean</span></div>
+                                    <div class="score warn"><b>@flows.Count(f => f.Outcome == "warn")</b><span>with exceptions</span></div>
+                                    <div class="score bad"><b>@flows.Count(f => f.Outcome == "failed")</b><span>failed</span></div>
+                                    <div class="score"><b>@(flows.Count == 0 ? "–" : $"{flows.Max(f => f.Ms):0} ms")</b><span>slowest</span></div>
+                                    <span class="spacer"></span>
+                                    <div class="search narrow">
+                                        <Icon Name="search" />
+                                        <input class="input" placeholder="Filter, e.g. /api/claims" @bind="flowFilter" @bind:event="oninput" />
+                                    </div>
+                                    <label class="check"><input type="checkbox" @bind="onlyProblems" /> Problems only</label>
+                                    <button class="btn small" @onclick="() => { flowSession.Flows.Clear(); flowId = null; }">Clear</button>
+                                </div>
+
+                                @if (flows.Count == 0)
+                                {
+                                    <div class="state">
+                                        <span class="glyph"><Icon Name="flow" Size="22" /></span>
+                                        <h3>@(flowSession.Running ? "Recording — nothing yet" : "Nothing was recorded")</h3>
+                                        <p>Use the app in your browser. Requests appear here as they finish; exceptions appear the moment they are thrown.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="flow-split">
+                                        <div class="flow-list">
+                                            @foreach (var f in flows.Where(f => !onlyProblems || f.Outcome != "ok").Take(150))
+                                            {
+                                                <button class="flow-item @f.Outcome @(picked?.TraceId == f.TraceId ? "active" : "")" @onclick="() => { flowId = f.TraceId; openStep = null; }">
+                                                    <span class="flow-mark"></span>
+                                                    <span class="flow-text">
+                                                        <span class="flow-title">@f.Title</span>
+                                                        <span class="flow-meta">
+                                                            @f.FirstSeen.ToLocalTime().ToString("HH:mm:ss")
+                                                            @if (f.StatusCode is { } httpCode)
+                                                            {
+                                                                <span> · @httpCode</span>
+                                                            }
+                                                            <span> · @f.Ms.ToString("0") ms · @f.Steps.Count steps</span>
+                                                            @if (f.Errors.Count > 0)
+                                                            {
+                                                                <span> · @f.Errors.Count exc</span>
+                                                            }
+                                                        </span>
+                                                    </span>
+                                                </button>
+                                            }
+                                        </div>
+
+                                        <div class="flow-detail">
+                                            @if (picked is null)
+                                            {
+                                                <div class="state"><p>No problems recorded. Untick "Problems only" to see every flow.</p></div>
+                                            }
+                                            else
+                                            {
+                                                <div class="flow-head">
+                                                    <span class="badge @(picked.Outcome == "failed" ? "bad" : picked.Outcome == "warn" ? "warn" : "ok")">@(picked.Outcome == "failed" ? "Failed" : picked.Outcome == "warn" ? "Completed with exceptions" : "Clean")</span>
+                                                    <h3>@picked.Title</h3>
+                                                    <span class="flow-meta">@picked.Ms.ToString("0") ms · trace @picked.TraceId[..Math.Min(8, picked.TraceId.Length)]</span>
+                                                </div>
+
+                                                @foreach (var error in picked.Errors.Where(x => x.SpanId is null || !picked.Steps.ContainsKey(x.SpanId)))
+                                                {
+                                                    @ErrorCard(error)
+                                                }
+
+                                                <div class="track">
+                                                    @foreach (var step in picked.Ordered())
+                                                    {
+                                                        var notes = picked.Notes.Where(n => n.SpanId == step.Id).ToList();
+                                                        var errors = picked.Errors.Where(x => x.SpanId == step.Id).ToList();
+                                                        var isOpen = openStep == step.Id;
+                                                        var share = picked.Ms > 0 ? Math.Clamp(step.Ms / picked.Ms * 100, 1, 100) : 1;
+                                                        <div class="phase @step.Category @(step.Failed ? "failed" : errors.Count > 0 ? "warn" : "") @(isOpen ? "open" : "")" style="--depth:@step.Depth">
+                                                            <button class="phase-head" @onclick="() => openStep = isOpen ? null : step.Id">
+                                                                <span class="phase-node"><Icon Name="@StepIcon(step)" Size="14" /></span>
+                                                                <span class="phase-text">
+                                                                    <span class="phase-kind">@StepKind(step)</span>
+                                                                    <span class="phase-title">@step.Title</span>
+                                                                </span>
+                                                                @if (step.StatusCode is { } httpCode)
+                                                                {
+                                                                    <span class="badge @(httpCode >= 400 ? "bad" : "ok")">@httpCode</span>
+                                                                }
+                                                                @if (notes.Count > 0)
+                                                                {
+                                                                    <span class="badge accent">@notes.Count data</span>
+                                                                }
+                                                                @if (errors.Count > 0)
+                                                                {
+                                                                    <span class="badge @(errors.Any(x => x.Unhandled) ? "bad" : "warn")">@errors.Count exception@(errors.Count == 1 ? "" : "s")</span>
+                                                                }
+                                                                <span class="phase-ms">@step.Ms.ToString("0") ms</span>
+                                                            </button>
+                                                            <div class="phase-bar"><i style="width:@(share.ToString("0", System.Globalization.CultureInfo.InvariantCulture))%"></i></div>
+
+                                                            @foreach (var error in errors)
+                                                            {
+                                                                @ErrorCard(error)
+                                                            }
+
+                                                            @if (isOpen)
+                                                            {
+                                                                <div class="phase-body">
+                                                                    @foreach (var note in notes)
+                                                                    {
+                                                                        <div class="capture">
+                                                                            <div class="capture-head"><Icon Name="box" Size="13" /> @note.Label @if (note.Title is not null){<span class="flow-meta">@note.Title</span>}</div>
+                                                                            <pre>@Pretty(note.Body)</pre>
+                                                                        </div>
+                                                                    }
+                                                                    @if (step.StatusText is not null)
+                                                                    {
+                                                                        <div class="capture"><div class="capture-head">Status</div><pre>@step.StatusText</pre></div>
+                                                                    }
+                                                                    <table class="tags">
+                                                                        <tr><td>source</td><td>@step.Source</td></tr>
+                                                                        <tr><td>started</td><td>@step.Start.ToLocalTime().ToString("HH:mm:ss.fff")</td></tr>
+                                                                        @foreach (var tag in step.Tags.OrderBy(t => t.Key))
+                                                                        {
+                                                                            <tr><td>@tag.Key</td><td>@tag.Value</td></tr>
+                                                                        }
+                                                                    </table>
+                                                                </div>
+                                                            }
+                                                        </div>
+                                                    }
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+                                }
                             }
                         }
                         else if (locked)
@@ -486,6 +655,10 @@
     private sealed record LogLine(string? Tag, int TagIndex, string Text, string Kind);
 
     private string tab = "vars";
+    private string? flowId;
+    private string? openStep;
+    private bool onlyProblems;
+    private string flowFilter = "";
     private string filter = "";
     private bool hideWarnings = true;
 
@@ -642,6 +815,103 @@
         env.Protected ? $"{env.Name}: protected by a passphrase" : $"{env.Name}: {counts.GetValueOrDefault(env.Name)} variables of this repo";
 
     private bool IsConfirming(TargetDef target, string mode) => confirmKey == $"run:{target.Name}:{mode}";
+
+    // ---------- flow ----------
+
+    /// <summary>The session whose flows are shown: the selected one if it records, else the newest that does.</summary>
+    private RunSession? flowSession => shown is { Flows: not null } ? shown : RepoSessions.LastOrDefault(s => s.Flows is not null) ?? shown;
+
+    private List<Flow> FlowList
+    {
+        get
+        {
+            var all = flowSession?.Flows?.Snapshot() ?? [];
+            return string.IsNullOrWhiteSpace(flowFilter)
+                ? all
+                : all.Where(f => f.Title.Contains(flowFilter.Trim(), StringComparison.OrdinalIgnoreCase)
+                              || f.Steps.Values.Any(s => s.Title.Contains(flowFilter.Trim(), StringComparison.OrdinalIgnoreCase))).ToList();
+        }
+    }
+
+    private static string StepIcon(FlowStep step) => step.Category switch
+    {
+        "request" => "download",
+        "http" => "external",
+        "db" => "database",
+        _ => "dot",
+    };
+
+    private static string StepKind(FlowStep step) => step.Category switch
+    {
+        "request" => "Incoming request",
+        "http" => "Call to another service",
+        "db" => "Database",
+        _ => step.Source.Length > 0 ? step.Source : "Step",
+    };
+
+    private static string Pretty(string body)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            return System.Text.Json.JsonSerializer.Serialize(doc.RootElement, new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+            });
+        }
+        catch (System.Text.Json.JsonException) { return body; }
+    }
+
+    private void OpenFrame(FlowFrame frame) => Try(() =>
+    {
+        if (frame.File is null) return;
+        DebugSupport.OpenInRider(flowSession?.Solution, frame.File, frame.Line);
+        Say($"Opened {System.IO.Path.GetFileName(frame.File)}:{frame.Line} in Rider.");
+    });
+
+    private RenderFragment ErrorCard(FlowError error) => __builder =>
+    {
+        var origin = error.Origin;
+        <div class="error-card @(error.Unhandled ? "unhandled" : "")">
+            <div class="error-top">
+                <Icon Name="alert" Size="15" />
+                <span class="error-type">@error.Type.Split('.').Last()</span>
+                <span class="badge @(error.Unhandled ? "bad" : "warn")">@(error.Unhandled ? "unhandled" : "thrown, then handled")</span>
+                <span class="flow-meta">@error.At.ToLocalTime().ToString("HH:mm:ss.fff")</span>
+            </div>
+            <div class="error-message">@error.Message</div>
+            @if (origin is not null)
+            {
+                <button class="frame origin" title="Open in Rider" @onclick="() => OpenFrame(origin)">
+                    <Icon Name="pin" Size="13" />
+                    <span class="mono">@System.IO.Path.GetFileName(origin.File):@origin.Line</span>
+                    <span class="frame-method">@origin.Method</span>
+                    <Icon Name="external" Size="12" />
+                </button>
+            }
+            @if (error.Frames.Count > 1)
+            {
+                <details>
+                    <summary>Call stack · @error.Frames.Count frames</summary>
+                    @foreach (var frame in error.Frames)
+                    {
+                        @if (frame.File is not null)
+                        {
+                            <button class="frame" title="Open in Rider" @onclick="() => OpenFrame(frame)">
+                                <span class="mono">@System.IO.Path.GetFileName(frame.File):@frame.Line</span>
+                                <span class="frame-method">@frame.Method</span>
+                            </button>
+                        }
+                        else
+                        {
+                            <div class="frame dim"><span class="frame-method">@frame.Method</span></div>
+                        }
+                    }
+                </details>
+            }
+        </div>
+    };
 
     /// <summary>The visible lines of the selected session, classified for colour, plus how many warnings were hidden.</summary>
     private (List<LogLine> Lines, int Hidden) LogView()

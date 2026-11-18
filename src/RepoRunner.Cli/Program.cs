@@ -525,7 +525,7 @@ internal static class Cli
         TextWriter output = Console.Out;
         if (debug is { } d)
         {
-            DebugSupport.Apply(block, d.Repo, d.Target);
+            DebugSupport.Apply(block, d.Repo, d.Target, waitForDebugger: true);
             var solution = DebugSupport.FindSolution(d.Repo, d.Target);
             output = new DebugWriter(Console.Out, pid =>
             {

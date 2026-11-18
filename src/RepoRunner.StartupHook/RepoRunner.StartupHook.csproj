@@ -1,12 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Loaded into the debugged app through DOTNET_STARTUP_HOOKS, so it targets netstandard2.0 to fit any .NET Core app. -->
+  <!-- Loaded into the app being run through DOTNET_STARTUP_HOOKS. net6.0 is the oldest runtime it has to fit. -->
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFramework>net6.0</TargetFramework>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
     <DebugType>none</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 
 </Project>

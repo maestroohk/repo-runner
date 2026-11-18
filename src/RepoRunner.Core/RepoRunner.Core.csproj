@@ -15,7 +15,7 @@
   <!-- The startup hook ships inside the core library and is written to disk when a debug run needs it. -->
   <ItemGroup>
     <ProjectReference Include="..\RepoRunner.StartupHook\RepoRunner.StartupHook.csproj" ReferenceOutputAssembly="false" />
-    <EmbeddedResource Include="..\RepoRunner.StartupHook\bin\$(Configuration)\netstandard2.0\RepoRunner.StartupHook.dll" LogicalName="RepoRunner.StartupHook.dll" Visible="false" />
+    <EmbeddedResource Include="..\RepoRunner.StartupHook\bin\$(Configuration)\net6.0\RepoRunner.StartupHook.dll" LogicalName="RepoRunner.StartupHook.dll" Visible="false" />
   </ItemGroup>
 
 </Project>

@@ -32,16 +32,38 @@ public static partial class DebugSupport
         return path;
     }
 
-    /// <summary>Adds what a debug run needs to the child's environment.</summary>
-    public static void Apply(IDictionary<string, string> environment, RepoInfo repo, TargetDef target)
+    /// <summary>
+    /// Adds the startup hook to the child's environment. <paramref name="waitForDebugger"/> pauses the app before
+    /// Main; <paramref name="flowPipe"/> names the pipe the app reports its activity to.
+    /// </summary>
+    public static void Apply(IDictionary<string, string> environment, RepoInfo repo, TargetDef target,
+        bool waitForDebugger, string? flowPipe = null)
     {
         if (target.Kind != "dotnet" || target.Project is null)
             throw new VaultException("Debug runs are available for .NET targets only for now.");
         var hook = HookPath();
         environment["DOTNET_STARTUP_HOOKS"] =
             environment.TryGetValue("DOTNET_STARTUP_HOOKS", out var existing) && existing.Length > 0 ? $"{hook};{existing}" : hook;
-        environment["RR_DEBUG_TARGET"] = AssemblyName(Path.Combine(repo.Path, target.Project));
-        if (!environment.ContainsKey("RR_DEBUG_TIMEOUT")) environment["RR_DEBUG_TIMEOUT"] = "300";
+        environment["RR_HOOK_TARGET"] = AssemblyName(Path.Combine(repo.Path, target.Project));
+        if (flowPipe is not null) environment["RR_FLOW_PIPE"] = flowPipe;
+        if (waitForDebugger)
+        {
+            environment["RR_DEBUG_WAIT"] = "1";
+            if (!environment.ContainsKey("RR_DEBUG_TIMEOUT")) environment["RR_DEBUG_TIMEOUT"] = "300";
+        }
+    }
+
+    /// <summary>Opens a source file at a line in Rider, in the window of the given solution when there is one.</summary>
+    public static void OpenInRider(string? solution, string file, int line)
+    {
+        var rider = FindRider() ?? throw new VaultException("Rider was not found.");
+        var psi = new ProcessStartInfo(rider) { UseShellExecute = false, CreateNoWindow = true };
+        if (solution is not null) psi.ArgumentList.Add(solution);
+        psi.ArgumentList.Add("--line");
+        psi.ArgumentList.Add(Math.Max(1, line).ToString());
+        psi.ArgumentList.Add(file);
+        try { Process.Start(psi)?.Dispose(); }
+        catch (Win32Exception ex) { throw new VaultException($"Could not start Rider: {ex.Message}"); }
     }
 
     /// <summary>The process name the app will run under: AssemblyName from the project file, else the file name.</summary>
