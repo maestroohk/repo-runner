@@ -1,4 +1,5 @@
 @page "/"
+@page "/flow/{FocusRepo}"
 @implements IDisposable
 @inject VaultService Vaults
 @inject SessionManager Sessions
@@ -7,7 +8,7 @@
 
 <PageTitle>RepoRunner</PageTitle>
 
-<div class="app">
+<div class="app @(Focused ? "focus" : "")">
     <aside class="sidebar">
         <div class="brand"><span class="logo"><Icon Name="play" Size="12" /></span>RepoRunner</div>
 
@@ -85,6 +86,27 @@
         else
         {
             <div class="content-inner">
+                @if (Focused)
+                {
+                    <div class="focus-bar">
+                        <span class="avatar" style="--hue:@Hue(repo.Name)">@Initials(repo.Name)</span>
+                        <b>@repo.Name</b>
+                        <span class="badge">@envName</span>
+                        @if (flowSession is { Running: true })
+                        {
+                            <span class="live-pill"><span class="pulse"></span> running · @Elapsed(flowSession)</span>
+                        }
+                        else
+                        {
+                            <span class="flow-meta">Not running. Start it from the main RepoRunner tab.</span>
+                        }
+                        <span class="spacer"></span>
+                        <div class="seg">
+                            <button class="seg-opt @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">Flow map</button>
+                            <button class="seg-opt @(tab == "features" ? "active" : "")" @onclick="@(() => tab = "features")">Features and code paths</button>
+                        </div>
+                    </div>
+                }
                 <header class="page-head">
                     <div class="title-block">
                         <span class="avatar lg" style="--hue:@Hue(repo.Name)">@Initials(repo.Name)</span>
@@ -304,6 +326,11 @@
                                 <div class="stage">
                                     <div class="canvas">
                                         <div class="canvas-bar">
+                                            @if (!Focused)
+                                            {
+                                                <a class="icon-btn" title="Open the map in its own tab" href="flow/@Uri.EscapeDataString(repo.Name)" target="_blank" rel="noopener"
+                                                   onclick="window.open(this.href, '_blank', 'noopener'); return false;"><Icon Name="expand" /></a>
+                                            }
                                             <span class="canvas-title">
                                                 @if (flowSession.Running)
                                                 {
@@ -607,7 +634,88 @@
                         }
                         else if (tab == "features")
                         {
-                            @if (scan is null)
+                            @if (codeFeature is not null)
+                            {
+                                var entries = EntriesOf(codeFeature);
+                                <div class="insp-head">
+                                    <button class="icon-btn" title="Back to all features" @onclick="() => codeFeature = null"><Icon Name="back" /></button>
+                                    <span class="verb v-@(codeFeature.Kind == "worker" ? "worker" : (codeFeature.Verb ?? "get").ToLowerInvariant())">@(codeFeature.Kind == "page" ? "PAGE" : codeFeature.Kind == "worker" ? "JOB" : codeFeature.Verb)</span>
+                                    <h3>@(codeFeature.Route ?? codeFeature.Name)</h3>
+                                    <span class="flow-meta">@codeFeature.File</span>
+                                </div>
+                                @if (code is null)
+                                {
+                                    <div class="state">
+                                        <span class="glyph"><Icon Name="code" Size="22" /></span>
+                                        <h3>Reading the code…</h3>
+                                        <p>Parsing this repo's source to follow calls between its classes. This happens once per repo.</p>
+                                    </div>
+                                }
+                                else if (entries.Count == 0)
+                                {
+                                    <div class="state">
+                                        <span class="glyph"><Icon Name="code" Size="22" /></span>
+                                        <h3>No entry method found</h3>
+                                        <p>This feature's handler could not be located by name. Routes mapped to inline lambdas are not followed yet.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    var entry = entries.Contains(codeEntry ?? "") ? codeEntry! : entries[0];
+                                    var trace = TraceOf(codeFeature, entry);
+                                    @if (entries.Count > 1)
+                                    {
+                                        <div class="entry-pick">
+                                            <span class="needs-title">Start from</span>
+                                            @foreach (var name in entries.Take(40))
+                                            {
+                                                <button class="chip-btn @(name == entry ? "active" : "")" @onclick="() => codeEntry = name">@name</button>
+                                            }
+                                        </div>
+                                    }
+                                    @if (trace is null)
+                                    {
+                                        <div class="state small"><p>Nothing to follow from @entry.</p></div>
+                                    }
+                                    else
+                                    {
+                                        var nodes = trace.All().ToList();
+                                        var reads = nodes.Where(n => n.Kind is "env").Select(n => n.Title).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                                        var settings = nodes.Where(n => n.Kind is "config").Select(n => n.Title).Distinct().ToList();
+                                        <div class="needs-grid">
+                                            <div class="needs">
+                                                <div class="needs-title">Variables it reads</div>
+                                                @if (reads.Count == 0)
+                                                {
+                                                    <span class="flow-meta">none on this path</span>
+                                                }
+                                                @foreach (var name in reads)
+                                                {
+                                                    var have = locked || vars.Any(v => v.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                                                    <span class="badge mono @(have ? "ok" : "bad")" title="@(have ? $"defined in {envName}" : $"not defined in {envName}")">@name</span>
+                                                }
+                                                @foreach (var name in settings)
+                                                {
+                                                    <span class="badge mono" title="read from configuration">@name</span>
+                                                }
+                                            </div>
+                                            <div class="needs">
+                                                <div class="needs-title">What it touches</div>
+                                                <span class="fact">Methods <b>@nodes.Count(n => n.Kind == "method")</b></span>
+                                                <span class="fact">Calls to other services <b>@nodes.Count(n => n.Kind == "http")</b></span>
+                                                <span class="fact">Database <b>@nodes.Count(n => n.Kind == "db")</b></span>
+                                                <span class="fact">Can throw <b>@nodes.Count(n => n.Kind == "throw")</b></span>
+                                                <span class="fact">Swallows errors <b class="@(nodes.Any(n => n.Kind == "catch") ? "warn-text" : "")">@nodes.Count(n => n.Kind == "catch")</b></span>
+                                            </div>
+                                        </div>
+                                        <div class="code-tree">
+                                            @CodeTree(trace, 0)
+                                        </div>
+                                        <div class="flow-meta">Followed by reading the source, not by running it: calls through reflection, delegates or types outside this repo are not shown.</div>
+                                    }
+                                }
+                            }
+                            else if (scan is null)
                             {
                                 <div class="state">
                                     <span class="glyph"><Icon Name="search" Size="22" /></span>
@@ -662,6 +770,7 @@
                                             {
                                                 <span class="badge @(used.Failed > 0 ? "bad" : "ok")">@used.Calls call@(used.Calls == 1 ? "" : "s")@(used.Failed > 0 ? $" · {used.Failed} failed" : "")</span>
                                             }
+                                            <button class="btn small" title="Follow this feature through the code" @onclick="() => OpenCode(feature)"><Icon Name="code" Size="14" /> Code path</button>
                                             @if (feature.Route is not null)
                                             {
                                                 <button class="btn small" title="Show only this feature on the map" @onclick="() => ShowFeature(feature)"><Icon Name="flow" Size="14" /> Map</button>
@@ -954,6 +1063,11 @@
     protected override void OnInitialized()
     {
         Reload();
+        if (Focused)
+        {
+            if (repos.FirstOrDefault(r => r.Name.Equals(FocusRepo, StringComparison.OrdinalIgnoreCase)) is { } wanted) SelectRepo(wanted);
+            tab = "flow";
+        }
         // Output and elapsed times change without any click; refresh twice a second while something is happening.
         timer = new Timer(_ =>
         {
@@ -1468,6 +1582,137 @@
         featureOfFlow.Clear();
     }
 
+    // ---------- code paths ----------
+
+    [Parameter] public string? FocusRepo { get; set; }
+
+    /// <summary>True on the /flow/{repo} route: the map and features alone, using the whole window.</summary>
+    private bool Focused => FocusRepo is not null;
+
+    private CodeIndex? code;
+    private long codeRepoId = -1;
+    private Feature? codeFeature;
+    private string? codeEntry;
+    private readonly Dictionary<string, CodeNode?> traces = [];
+
+    private void OpenCode(Feature feature)
+    {
+        codeFeature = feature;
+        codeEntry = null;
+        if (repo is null || repo.Id == codeRepoId) return;
+        var (id, path) = (repo.Id, repo.Path);
+        codeRepoId = id;
+        code = null;
+        traces.Clear();
+        _ = Task.Run(() =>
+        {
+            var built = CodeIndex.Build(path);
+            InvokeAsync(() =>
+            {
+                if (codeRepoId != id) return;
+                code = built;
+                StateHasChanged();
+            });
+        });
+    }
+
+    /// <summary>The type a feature's code lives in.</summary>
+    private string? TypeOf(Feature feature)
+    {
+        if (code is null) return null;
+        var candidates = feature.Kind switch
+        {
+            "page" => new[] { CodeIndex.ComponentKey(feature.File) },
+            "endpoint" => new[] { feature.Name.Split('.')[0] + "Controller", feature.Name.Split('.')[0] },
+            _ => new[] { feature.Name },
+        };
+        return candidates.FirstOrDefault(code.HasType);
+    }
+
+    /// <summary>Where a feature's code can start: the action for an endpoint, every handler for a page, the loop for a worker.</summary>
+    private List<string> EntriesOf(Feature feature)
+    {
+        if (TypeOf(feature) is not { } type) return [];
+        var methods = code!.MethodsOf(type);
+        return feature.Kind switch
+        {
+            "endpoint" => methods.Where(m => m == feature.Name.Split('.').Last()).ToList(),
+            "worker" => methods.Where(m => m is "ExecuteAsync" or "StartAsync").Concat(methods.Where(m => m is not ("ExecuteAsync" or "StartAsync"))).ToList(),
+            // Lifecycle methods first: they run when the page opens. The rest are its buttons and helpers.
+            _ => methods.OrderBy(m => m.StartsWith("On") && (m.Contains("Initialized") || m.Contains("ParametersSet") || m.Contains("AfterRender")) ? 0 : 1).ToList(),
+        };
+    }
+
+    private CodeNode? TraceOf(Feature feature, string entry)
+    {
+        if (TypeOf(feature) is not { } type) return null;
+        var key = type + "." + entry;
+        return traces.TryGetValue(key, out var known) ? known : traces[key] = code!.Trace(type, entry);
+    }
+
+    private void OpenNode(CodeNode node) => Try(() =>
+    {
+        if (node.File is null) return;
+        var current = repo!;
+        var target = targets.FirstOrDefault(t => t.Kind == "dotnet");
+        DebugSupport.OpenInRider(target is null ? null : DebugSupport.FindSolution(current, target), System.IO.Path.Combine(current.Path, node.File), node.Line);
+        Say($"Opened {System.IO.Path.GetFileName(node.File)}:{node.Line} in Rider.");
+    });
+
+    private static (string Icon, string Label) CodeKind(CodeNode node) => node.Kind switch
+    {
+        "env" => ("key", "reads variable"),
+        "config" => ("key", "reads setting"),
+        "http" => ("external", "calls another service"),
+        "db" => ("database", "database"),
+        "throw" => ("alert", "can throw"),
+        "catch" => ("eye-off", "swallows"),
+        _ => ("code", ""),
+    };
+
+    /// <summary>One line of the code path: what happens, where, and a jump to it.</summary>
+    private RenderFragment CodeRow(CodeNode node) => __builder =>
+    {
+        var (icon, label) = CodeKind(node);
+        <span class="code-icon"><Icon Name="@icon" Size="13" /></span>
+        @if (label.Length > 0)
+        {
+            <span class="code-label">@label</span>
+        }
+        <span class="code-title">@node.Title</span>
+        @if (node.Detail is not null)
+        {
+            <span class="code-detail">@node.Detail</span>
+        }
+        @if (node.Note is not null)
+        {
+            <span class="badge">@node.Note</span>
+        }
+        <button class="code-where" title="Open in Rider" @onclick="() => OpenNode(node)" @onclick:stopPropagation="true" @onclick:preventDefault="true">
+            @System.IO.Path.GetFileName(node.File):@node.Line
+        </button>
+    };
+
+    private RenderFragment CodeTree(CodeNode node, int depth) => __builder =>
+    {
+        @if (node.Children.Count == 0)
+        {
+            <div class="code-row @node.Kind">@CodeRow(node)</div>
+        }
+        else
+        {
+            <details class="code-branch" open="@(depth < 3)">
+                <summary class="code-row method">@CodeRow(node)</summary>
+                <div class="code-children">
+                    @foreach (var child in node.Children)
+                    {
+                        @CodeTree(child, depth + 1)
+                    }
+                </div>
+            </details>
+        }
+    };
+
     // ---------- features ----------
 
     private void EnsureScan()
@@ -1656,6 +1901,7 @@
         confirmKey = null;
         shown = null;
         filter = "";
+        codeFeature = null;
         LoadRepo();
         tab = RepoSessions.Any(s => s.Running) ? "output" : "vars";
     }
