@@ -122,7 +122,7 @@ public static class Launcher
     /// there are several, and secret values are masked. Companions are stopped when the first process ends.
     /// </summary>
     public static async Task<int> RunAsync(IReadOnlyList<ProcessSpec> specs, IReadOnlyDictionary<string, string> environment,
-        IEnumerable<string> secretValues, TextWriter output, CancellationToken stop)
+        IEnumerable<string> secretValues, TextWriter output, CancellationToken stop, TimeSpan? grace = null, bool hideWindows = false)
     {
         var masks = secretValues.Where(v => v.Length >= 6).Distinct().OrderByDescending(v => v.Length).ToArray();
         var gate = new object();
@@ -140,6 +140,8 @@ public static class Launcher
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
+                    // A host without a console (the desktop app) would otherwise get a console window per child.
+                    CreateNoWindow = hideWindows,
                 };
                 if (spec.RawArguments is not null) psi.Arguments = spec.RawArguments;
                 else foreach (var arg in spec.Args) psi.ArgumentList.Add(arg);
@@ -170,8 +172,8 @@ public static class Launcher
             catch (OperationCanceledException)
             {
                 // Ctrl+C reached the children through the shared console; give the app a moment to shut down cleanly.
-                using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-                try { await main.WaitForExitAsync(grace.Token); } catch (OperationCanceledException) { }
+                using var wait = new CancellationTokenSource(grace ?? TimeSpan.FromSeconds(4));
+                try { await main.WaitForExitAsync(wait.Token); } catch (OperationCanceledException) { }
             }
             if (!main.HasExited) main.Kill(entireProcessTree: true);
             main.WaitForExit();

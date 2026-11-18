@@ -14,7 +14,17 @@ Design document: https://claude.ai/artifact/MSdACk61ieiLPEfTYhRUKN
 
 Put `artifacts` on your `PATH`, or copy `rr.exe` somewhere that already is.
 
-## First use, inside a repo
+## The window
+
+`artifactspp\RepoRunner.exe` starts RepoRunner and opens it in your browser: repos on the left, an
+environment selector, Run / Watch / Stop buttons with live output, and the variables grid. Run
+`.\install-shortcut.ps1` once for a Desktop shortcut.
+
+It is a local web page, not an installed desktop program. The server listens on `127.0.0.1` only and every
+request needs the token issued at that launch. Protected environments stay unlocked for 15 minutes in memory.
+If the `.exe` is ever blocked by policy, start it with `dotnet artifactspp\RepoRunner.dll` instead.
+
+## First use from the command line, inside a repo
 
 ```powershell
 rr add --env UAT                                  # register the repo, detect run targets
@@ -48,4 +58,5 @@ The vault is `%LocalAppData%\RepoRunner\vault.db`. Set `RR_HOME` to use another 
 
 - `src/RepoRunner.Core` - vault, encryption, resolver, project detection, launcher
 - `src/RepoRunner.Cli` - the `rr` command
+- `src/RepoRunner.App` - the browser window (Blazor Server on loopback)
 - `tests/RepoRunner.Tests` - xUnit tests

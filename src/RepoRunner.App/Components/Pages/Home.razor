@@ -1,0 +1,727 @@
+﻿@page "/"
+@implements IDisposable
+@inject VaultService Vaults
+@inject SessionManager Sessions
+@inject IHostApplicationLifetime Lifetime
+@inject IJSRuntime JS
+
+<PageTitle>RepoRunner</PageTitle>
+
+<div class="shell">
+    <header class="top">
+        <div class="brand">RepoRunner</div>
+        <div class="muted small">@Vaults.VaultFile</div>
+        <span class="spacer"></span>
+        @foreach (var name in unlocked)
+        {
+            <span class="chip danger">@name unlocked</span>
+        }
+        @if (unlocked.Count > 0)
+        {
+            <button class="btn" @onclick="LockAll">Lock now</button>
+        }
+        <button class="btn" @onclick="@(() => Confirm("quit", Quit))">@(confirmKey == "quit" ? "Click again to quit" : "Quit")</button>
+    </header>
+
+    <aside class="side">
+        <div class="side-title">Repos</div>
+        @foreach (var r in repos)
+        {
+            var running = sessions.Count(s => s.Running && s.Repo == r.Name);
+            <button class="repo @(repo?.Id == r.Id ? "active" : "")" @onclick="() => SelectRepo(r)">
+                <span class="repo-name">@r.Name</span>
+                @if (running > 0)
+                {
+                    <span class="dot" title="@running running"></span>
+                }
+            </button>
+        }
+        @if (repos.Count == 0)
+        {
+            <div class="muted small pad">No repos yet.</div>
+        }
+
+        @if (showAdd)
+        {
+            <div class="add-form">
+                <label>Folder of the repo</label>
+                <input class="input" list="repo-folders" placeholder="C:\Users\...\source\repos\MyApi" @bind="addPath" @bind:event="oninput" />
+                <datalist id="repo-folders">
+                    @foreach (var folder in folderSuggestions)
+                    {
+                        <option value="@folder"></option>
+                    }
+                </datalist>
+                <label>Name (optional)</label>
+                <input class="input" placeholder="taken from the folder" @bind="addName" />
+                <div class="row">
+                    <button class="btn primary" @onclick="AddRepo">Add repo</button>
+                    <button class="btn" @onclick="() => showAdd = false">Cancel</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <button class="btn wide" @onclick="OpenAdd">+ Add repo</button>
+        }
+    </aside>
+
+    <main class="main">
+        @if (message is not null)
+        {
+            <div class="banner @(messageIsError ? "error" : "ok")">
+                <span>@message</span>
+                <button class="link" @onclick="() => message = null">Dismiss</button>
+            </div>
+        }
+
+        @if (repo is null)
+        {
+            <div class="empty">
+                <h1>Add your first repo</h1>
+                <p>RepoRunner keeps each repo's variables in an encrypted vault and starts the app with them. Choose "Add repo" on the left and paste the repo's folder.</p>
+            </div>
+        }
+        else
+        {
+            <section class="head">
+                <div>
+                    <h1>@repo.Name</h1>
+                    <div class="muted small">@repo.Path</div>
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="card-title">Environment</div>
+                <div class="envs">
+                    @foreach (var e in envs)
+                    {
+                        <button class="env @(e.Name == envName ? "active" : "") @(e.Protected ? "protected" : "")" @onclick="() => SelectEnv(e.Name)">
+                            <span>@e.Name</span>
+                            <span class="count">@(counts.GetValueOrDefault(e.Name))</span>
+                            @if (e.Protected)
+                            {
+                                <span class="lock">@(Vaults.IsUnlocked(e) ? "unlocked" : "locked")</span>
+                            }
+                        </button>
+                    }
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="card-title">Run on @envName</div>
+                @if (targets.Count == 0)
+                {
+                    <div class="muted">No run targets were detected in this repo.</div>
+                }
+                @foreach (var t in targets)
+                {
+                    var live = sessions.FirstOrDefault(s => s.Running && s.Repo == repo.Name && s.Target == t.Name);
+                    var missing = locked ? [] : t.Requires.Where(k => !vars.Any(v => v.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList();
+                    <div class="target">
+                        <div class="target-info">
+                            <div class="target-name">
+                                @t.Name
+                                <span class="chip">@t.Kind</span>
+                                @if (t.Name.Equals(repo.DefaultTarget, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    <span class="chip">default</span>
+                                }
+                            </div>
+                            <div class="muted small">
+                                @(t.Kind == "dotnet" ? t.Project : t.Kind == "node" ? $"npm run {t.Script} in {t.Cwd}" : $"{t.Command} {string.Join(' ', t.Args)}")
+                                @if (t.Companions.Count > 0)
+                                {
+                                    <span> · starts with @string.Join(", ", t.Companions)</span>
+                                }
+                            </div>
+                            @if (missing.Count > 0)
+                            {
+                                <div class="warn small">@envName is missing: @string.Join(", ", missing)</div>
+                            }
+                        </div>
+                        <div class="target-actions">
+                            @if (live is not null)
+                            {
+                                <span class="status"><span class="dot"></span> on @live.Env · @Elapsed(live)</span>
+                                @if (live.Url is not null)
+                                {
+                                    <a class="btn" href="@live.Url" target="_blank">Open @live.Url</a>
+                                }
+                                <button class="btn danger" @onclick="() => StopSession(live)">Stop</button>
+                            }
+                            else
+                            {
+                                <button class="btn primary" @onclick="() => Run(t, false)">@RunLabel(t, false)</button>
+                                @if (t.Kind == "dotnet")
+                                {
+                                    <button class="btn" @onclick="() => Run(t, true)">@RunLabel(t, true)</button>
+                                }
+                            }
+                        </div>
+                    </div>
+                }
+            </section>
+
+            @if (RepoSessions.Count > 0)
+            {
+                <section class="card">
+                    <div class="card-title">Output</div>
+                    <div class="tabs">
+                        @foreach (var s in RepoSessions)
+                        {
+                            <button class="tab @(s.Id == shown?.Id ? "active" : "")" @onclick="() => shown = s">
+                                @if (s.Running)
+                                {
+                                    <span class="dot"></span>
+                                }
+                                @s.Labels · @s.Env @(s.Running ? "" : "(ended)")
+                            </button>
+                        }
+                        <span class="spacer"></span>
+                        @if (shown is { Running: false })
+                        {
+                            <button class="link" @onclick="() => Dismiss(shown)">Clear</button>
+                        }
+                    </div>
+                    @if (shown is not null)
+                    {
+                        <pre class="log" @ref="logElement">@shown.Text()</pre>
+                    }
+                </section>
+            }
+
+            <section class="card">
+                <div class="card-title">
+                    Variables for @envName
+                    <span class="spacer"></span>
+                    @if (!locked)
+                    {
+                        <button class="btn" @onclick="NewVariable">+ Add variable</button>
+                        <button class="btn" @onclick="() => showPaste = !showPaste">Paste a .env block</button>
+                    }
+                </div>
+
+                @if (locked)
+                {
+                    <div class="locked">
+                        <div>@envName is protected. Its values stay encrypted until you enter the passphrase.</div>
+                        <button class="btn primary" @onclick="() => OpenUnlock(null)">@(CurrentEnv.HasPassphrase ? "Unlock" : "Set a passphrase")</button>
+                    </div>
+                }
+                else
+                {
+                    @foreach (var f in files)
+                    {
+                        <div class="file">
+                            <div>
+                                <span class="mono">@f.Relative</span>
+                                @if (f.Profile is not null)
+                                {
+                                    <span class="muted"> · profile "@f.Profile"</span>
+                                }
+                                <span class="muted small"> · @f.Pairs.Count variables in plain text</span>
+                                @if (f.InVault)
+                                {
+                                    <span class="chip good">all in @envName</span>
+                                }
+                            </div>
+                            <div class="row">
+                                @if (!f.InVault)
+                                {
+                                    <button class="btn" @onclick="() => ImportFile(f)">Import into @envName</button>
+                                }
+                                else if (f.Profile is null)
+                                {
+                                    <button class="btn danger" @onclick="@(() => Confirm("file:" + f.Path, () => DeleteFile(f)))">
+                                        @(confirmKey == "file:" + f.Path ? "Click again to delete the file" : "Delete file")
+                                    </button>
+                                }
+                            </div>
+                        </div>
+                    }
+
+                    @if (showPaste)
+                    {
+                        <div class="form">
+                            <label>Paste KEY=VALUE lines. They are stored for @envName and never written to a file.</label>
+                            <textarea class="input area" rows="6" @bind="pasteText" placeholder="OpsApiBaseUrl=https://...&#10;ApiPassword=..."></textarea>
+                            <div class="row">
+                                <button class="btn primary" @onclick="ImportPaste">Import into @envName</button>
+                                <button class="btn" @onclick="() => showPaste = false">Cancel</button>
+                            </div>
+                        </div>
+                    }
+
+                    @if (editing)
+                    {
+                        <div class="form">
+                            <div class="grid2">
+                                <div>
+                                    <label>Name</label>
+                                    <input class="input mono" @bind="formName" disabled="@formIsEdit" placeholder="OpsApiBaseUrl" />
+                                </div>
+                                <div>
+                                    <label>Value</label>
+                                    <input class="input mono" type="@(formSecret ? "password" : "text")" @bind="formValue" autocomplete="off" />
+                                </div>
+                            </div>
+                            <label class="check"><input type="checkbox" @bind="formSecret" /> Secret (masked on screen and in output)</label>
+                            <div class="row">
+                                <button class="btn primary" @onclick="SaveVariable">Save</button>
+                                <button class="btn" @onclick="() => editing = false">Cancel</button>
+                            </div>
+                        </div>
+                    }
+
+                    @if (vars.Count == 0)
+                    {
+                        <div class="muted pad">No variables for @envName yet. Import a file above, paste a block, or add one.</div>
+                    }
+                    else
+                    {
+                        <table class="vars">
+                            <thead>
+                                <tr><th>Name</th><th>Value</th><th>From</th><th></th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var v in vars)
+                                {
+                                    var own = v.Origin == "repo";
+                                    <tr @key="v.Name">
+                                        <td class="mono">@v.Name</td>
+                                        <td class="mono value">@(v.Secret && !revealed.Contains(v.Name) ? "••••••••" : v.Value)</td>
+                                        <td class="muted small">@v.Origin</td>
+                                        <td class="actions">
+                                            @if (v.Secret)
+                                            {
+                                                <button class="link" @onclick="() => ToggleReveal(v)">@(revealed.Contains(v.Name) ? "Hide" : "Show")</button>
+                                            }
+                                            @if (own)
+                                            {
+                                                <button class="link" @onclick="() => ToggleSecret(v)">@(v.Secret ? "Not secret" : "Mark secret")</button>
+                                                <button class="link" @onclick="() => EditVariable(v)">Edit</button>
+                                                <button class="link danger" @onclick="@(() => Confirm("var:" + v.Name, () => DeleteVariable(v)))">
+                                                    @(confirmKey == "var:" + v.Name ? "Click again" : "Delete")
+                                                </button>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                }
+            </section>
+        }
+    </main>
+</div>
+
+@if (showUnlock)
+{
+    <div class="overlay">
+        <div class="dialog">
+            <h2>@(CurrentEnv.HasPassphrase ? $"Unlock {envName}" : $"Set a passphrase for {envName}")</h2>
+            <p class="muted">
+                @(CurrentEnv.HasPassphrase
+                    ? $"Stays unlocked for {VaultService.UnlockWindow.TotalMinutes:0} minutes, in memory only."
+                    : "At least 8 characters. There is no recovery if it is forgotten.")
+            </p>
+            <input class="input" type="password" placeholder="Passphrase" @bind="passphrase" @bind:event="oninput" @onkeydown="UnlockOnEnter" autocomplete="off" />
+            @if (!CurrentEnv.HasPassphrase)
+            {
+                <input class="input" type="password" placeholder="Repeat it" @bind="passphraseAgain" @bind:event="oninput" @onkeydown="UnlockOnEnter" autocomplete="off" />
+            }
+            @if (unlockError is not null)
+            {
+                <div class="warn">@unlockError</div>
+            }
+            <div class="row end">
+                <button class="btn" @onclick="CloseUnlock">Cancel</button>
+                <button class="btn primary" @onclick="Unlock">@(CurrentEnv.HasPassphrase ? "Unlock" : "Set passphrase")</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private sealed record FileItem(string Path, string Relative, string? Profile, List<KeyValuePair<string, string>> Pairs, bool InVault);
+
+    private List<RepoInfo> repos = [];
+    private List<EnvInfo> envs = [];
+    private List<TargetDef> targets = [];
+    private List<Variable> vars = [];
+    private List<FileItem> files = [];
+    private List<RunSession> sessions = [];
+    private List<string> unlocked = [];
+    private List<string> folderSuggestions = [];
+    private Dictionary<string, int> counts = [];
+    private readonly HashSet<string> revealed = new(StringComparer.OrdinalIgnoreCase);
+
+    private RepoInfo? repo;
+    private string envName = "LOCAL";
+    private bool locked;
+    private RunSession? shown;
+    private ElementReference logElement;
+
+    private string? message;
+    private bool messageIsError;
+    private string? confirmKey;
+
+    private bool showAdd;
+    private string addPath = "";
+    private string addName = "";
+
+    private bool editing, formIsEdit, formSecret;
+    private string formName = "", formValue = "";
+
+    private bool showPaste;
+    private string pasteText = "";
+
+    private bool showUnlock;
+    private string passphrase = "", passphraseAgain = "";
+    private string? unlockError;
+    private Action? afterUnlock;
+
+    private Timer? timer;
+    private long seenVersion = -1;
+
+    private EnvInfo CurrentEnv => envs.First(e => e.Name == envName);
+    private List<RunSession> RepoSessions => repo is null ? [] : sessions.Where(s => s.Repo == repo.Name).ToList();
+
+    protected override void OnInitialized()
+    {
+        Reload();
+        // Output and elapsed times change without any click; refresh twice a second while something is happening.
+        timer = new Timer(_ =>
+        {
+            var version = Sessions.Version;
+            if (version == seenVersion && !sessions.Any(s => s.Running) && unlocked.Count == 0) return;
+            seenVersion = version;
+            InvokeAsync(() =>
+            {
+                sessions = Sessions.All();
+                var nowUnlocked = Vaults.UnlockedNames();
+                if (nowUnlocked.Count != unlocked.Count) Reload(); // a protected environment just timed out
+                StateHasChanged();
+            });
+        }, null, 500, 500);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (shown is { Running: true }) await JS.InvokeVoidAsync("rrScrollEnd", logElement);
+    }
+
+    public void Dispose() => timer?.Dispose();
+
+    // ---------- loading ----------
+
+    private void Reload()
+    {
+        repos = Vaults.Use(v => v.Repos());
+        envs = Vaults.Use(v => v.Environments());
+        unlocked = Vaults.UnlockedNames();
+        sessions = Sessions.All();
+        repo = repo is null ? repos.FirstOrDefault() : repos.FirstOrDefault(r => r.Id == repo.Id) ?? repos.FirstOrDefault();
+        LoadRepo();
+    }
+
+    private void LoadRepo()
+    {
+        vars = [];
+        files = [];
+        targets = [];
+        counts = [];
+        if (repo is null) return;
+
+        if (!envs.Any(e => e.Name == envName)) envName = envs[0].Name;
+        var current = repo;
+        var env = CurrentEnv;
+        targets = Vaults.Use(v => v.Targets(current));
+        counts = envs.ToDictionary(e => e.Name, e => Vaults.Use(v => v.CountVars(Scope.Repo(current.Id), e)));
+        locked = !Vaults.IsUnlocked(env);
+        if (locked) return;
+
+        vars = Vaults.Use(v =>
+        {
+            var resolved = v.Resolve(current, env);
+            return resolved.Values.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(p => new Variable(p.Key, p.Value, resolved.SecretNames.Contains(p.Key), resolved.Origins[p.Key])).ToList();
+        });
+        files = FindFiles(current);
+        if (shown is null || shown.Repo != current.Name) shown = RepoSessions.LastOrDefault();
+    }
+
+    private List<FileItem> FindFiles(RepoInfo current)
+    {
+        var own = vars.Where(v => v.Origin == "repo").ToDictionary(v => v.Name, v => v.Value, StringComparer.OrdinalIgnoreCase);
+        bool InVault(List<KeyValuePair<string, string>> pairs) =>
+            pairs.Count > 0 && pairs.All(p => own.TryGetValue(p.Key, out var value) && value == p.Value);
+
+        var items = new List<FileItem>();
+        foreach (var path in PlaintextFiles.Find(current.Path))
+        {
+            var relative = System.IO.Path.GetRelativePath(current.Path, path);
+            try
+            {
+                if (System.IO.Path.GetFileName(path).Equals("launchSettings.json", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var profile in LaunchSettings.Read(path).Where(p => p.Variables.Count > 1))
+                        items.Add(new FileItem(path, relative, profile.Name, profile.Variables, InVault(profile.Variables)));
+                }
+                else
+                {
+                    var pairs = DotEnv.Parse(File.ReadAllText(path));
+                    if (pairs.Count > 0) items.Add(new FileItem(path, relative, null, pairs, InVault(pairs)));
+                }
+            }
+            catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException) { }
+        }
+        return items;
+    }
+
+    // ---------- small helpers ----------
+
+    private void Say(string text, bool error = false) => (message, messageIsError) = (text, error);
+
+    private void Try(Action work)
+    {
+        try { work(); }
+        catch (VaultException ex) { Say(ex.Message, error: true); }
+    }
+
+    private void Confirm(string key, Action action)
+    {
+        if (confirmKey != key) { confirmKey = key; return; }
+        confirmKey = null;
+        action();
+    }
+
+    private static string Elapsed(RunSession s)
+    {
+        var span = (s.Ended ?? DateTime.Now) - s.Started;
+        return span.TotalHours >= 1 ? span.ToString(@"h\:mm\:ss") : span.ToString(@"m\:ss");
+    }
+
+    private string RunLabel(TargetDef target, bool watch)
+    {
+        var verb = watch ? "Watch" : "Run";
+        return confirmKey == $"run:{target.Name}:{watch}" ? $"Click again to {verb.ToLowerInvariant()} on {envName}" : verb;
+    }
+
+    // ---------- repos and environments ----------
+
+    private void SelectRepo(RepoInfo selected)
+    {
+        repo = selected;
+        if (selected.DefaultEnv is { } preferred && envs.Any(e => e.Name == preferred)) envName = preferred;
+        revealed.Clear();
+        editing = showPaste = false;
+        confirmKey = null;
+        shown = null;
+        LoadRepo();
+    }
+
+    private void SelectEnv(string name)
+    {
+        envName = name;
+        revealed.Clear();
+        editing = showPaste = false;
+        confirmKey = null;
+        var current = repo!;
+        Vaults.Use(v => v.SetRepoDefaults(current, null, name)); // reopen on the environment last used
+        Reload();
+    }
+
+    private void OpenAdd()
+    {
+        showAdd = true;
+        addPath = addName = "";
+        var known = repos.Select(r => r.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var roots = repos.Select(r => System.IO.Path.GetDirectoryName(r.Path))
+            .Append(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "source", "repos"))
+            .Where(d => d is not null && Directory.Exists(d)).Distinct(StringComparer.OrdinalIgnoreCase);
+        folderSuggestions = roots.SelectMany(d => Directory.GetDirectories(d!)).Where(d => !known.Contains(d))
+            .OrderBy(d => d, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private void AddRepo() => Try(() =>
+    {
+        if (string.IsNullOrWhiteSpace(addPath)) throw new VaultException("Enter the repo's folder.");
+        var added = Vaults.Use(v =>
+        {
+            var created = v.AddRepo(addPath.Trim().Trim('"'), string.IsNullOrWhiteSpace(addName) ? null : addName.Trim());
+            var detected = Detector.Detect(created.Path);
+            foreach (var target in detected.Targets) v.SaveTarget(created, target);
+            v.SetRepoDefaults(created, detected.DefaultTarget, null);
+            v.Audit("add", created.Name);
+            return (Repo: v.GetRepo(created.Name), Count: detected.Targets.Count);
+        });
+        showAdd = false;
+        repo = added.Repo;
+        shown = null;
+        Reload();
+        Say($"Added {added.Repo.Name} with {added.Count} run target(s).");
+    });
+
+    // ---------- running ----------
+
+    private void Run(TargetDef target, bool watch)
+    {
+        var env = CurrentEnv;
+        if (!Vaults.IsUnlocked(env)) { OpenUnlock(() => Run(target, watch)); return; }
+        var key = $"run:{target.Name}:{watch}";
+        if (env.Protected && confirmKey != key) { confirmKey = key; return; }
+        confirmKey = null;
+        Try(() =>
+        {
+            shown = Sessions.Start(Vaults, repo!, env, target, watch);
+            sessions = Sessions.All();
+        });
+    }
+
+    private void StopSession(RunSession session) => Sessions.Stop(session);
+
+    private void Dismiss(RunSession session)
+    {
+        Sessions.Dismiss(session);
+        sessions = Sessions.All();
+        shown = RepoSessions.LastOrDefault();
+    }
+
+    private void Quit() => Lifetime.StopApplication();
+
+    // ---------- variables ----------
+
+    private void NewVariable()
+    {
+        (editing, formIsEdit, formName, formValue, formSecret) = (true, false, "", "", false);
+    }
+
+    private void EditVariable(Variable v)
+    {
+        (editing, formIsEdit, formName, formValue, formSecret) = (true, true, v.Name, v.Value, v.Secret);
+    }
+
+    private void SaveVariable() => Try(() =>
+    {
+        if (string.IsNullOrWhiteSpace(formName)) throw new VaultException("Give the variable a name.");
+        var (current, env, name, value, secret) = (repo!, CurrentEnv, formName.Trim(), formValue, formSecret);
+        Vaults.Use(v =>
+        {
+            v.SetVar(Scope.Repo(current.Id), env, name, value, secret);
+            v.Audit("set", current.Name, env.Name, name);
+        });
+        editing = false;
+        Reload();
+        Say($"Saved {name} for {env.Name}.");
+    });
+
+    private void DeleteVariable(Variable variable) => Try(() =>
+    {
+        var (current, env) = (repo!, CurrentEnv);
+        Vaults.Use(v =>
+        {
+            v.RemoveVar(Scope.Repo(current.Id), env, variable.Name);
+            v.Audit("unset", current.Name, env.Name, variable.Name);
+        });
+        Reload();
+    });
+
+    private void ToggleSecret(Variable variable) => Try(() =>
+    {
+        var (current, env) = (repo!, CurrentEnv);
+        Vaults.Use(v => v.SetSecret(Scope.Repo(current.Id), env, variable.Name, !variable.Secret));
+        revealed.Remove(variable.Name);
+        Reload();
+    });
+
+    private void ToggleReveal(Variable variable)
+    {
+        if (!revealed.Add(variable.Name)) { revealed.Remove(variable.Name); return; }
+        var (current, env) = (repo!, CurrentEnv);
+        Vaults.Use(v => v.Audit("reveal", current.Name, env.Name, variable.Name));
+    }
+
+    private int Store(List<KeyValuePair<string, string>> pairs, string source)
+    {
+        var (current, env) = (repo!, CurrentEnv);
+        return Vaults.Use(v =>
+        {
+            foreach (var (name, value) in pairs) v.SetVar(Scope.Repo(current.Id), env, name, value);
+            var stored = v.ListVars(Scope.Repo(current.Id), env, "repo").ToDictionary(x => x.Name, x => x.Value, StringComparer.OrdinalIgnoreCase);
+            var bad = pairs.Where(p => !stored.TryGetValue(p.Key, out var value) || value != pairs.Last(q => q.Key.Equals(p.Key, StringComparison.OrdinalIgnoreCase)).Value)
+                .Select(p => p.Key).Distinct().ToList();
+            if (bad.Count > 0) throw new VaultException($"Could not verify: {string.Join(", ", bad)}.");
+            v.Audit("import", current.Name, env.Name, $"{pairs.Count} from {source}");
+            return pairs.Select(p => p.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        });
+    }
+
+    private void ImportPaste() => Try(() =>
+    {
+        var pairs = DotEnv.Parse(pasteText);
+        if (pairs.Count == 0) throw new VaultException("No KEY=VALUE lines found in the pasted text.");
+        var count = Store(pairs, "pasted text");
+        pasteText = "";
+        showPaste = false;
+        Reload();
+        Say($"Imported and verified {count} variables into {envName}.");
+    });
+
+    private void ImportFile(FileItem file) => Try(() =>
+    {
+        var count = Store(file.Pairs, System.IO.Path.GetFileName(file.Path));
+        Reload();
+        Say($"Imported and verified {count} variables from {file.Relative} into {envName}. The file is still on disk.");
+    });
+
+    private void DeleteFile(FileItem file) => Try(() =>
+    {
+        // Offered only when every value in the file matches what the vault holds for this environment.
+        if (!file.InVault) throw new VaultException("That file has values the vault does not hold yet. Import it first.");
+        try { File.Delete(file.Path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { throw new VaultException($"Could not delete the file: {ex.Message}"); }
+        var (current, env) = (repo!, CurrentEnv);
+        Vaults.Use(v => v.Audit("delete-source", current.Name, env.Name, file.Relative));
+        Reload();
+        Say($"Deleted {file.Relative}. {current.Name} now gets these values only from the vault.");
+    });
+
+    // ---------- protected environments ----------
+
+    private void OpenUnlock(Action? then)
+    {
+        (showUnlock, passphrase, passphraseAgain, unlockError, afterUnlock) = (true, "", "", null, then);
+    }
+
+    private void CloseUnlock()
+    {
+        (showUnlock, passphrase, passphraseAgain, afterUnlock) = (false, "", "", null);
+    }
+
+    private void UnlockOnEnter(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") Unlock();
+    }
+
+    private void Unlock()
+    {
+        var env = CurrentEnv;
+        if (!env.HasPassphrase && passphrase != passphraseAgain) { unlockError = "The two entries differ."; return; }
+        try { Vaults.Unlock(env, passphrase); }
+        catch (VaultException ex) { unlockError = ex.Message; return; }
+        var then = afterUnlock;
+        CloseUnlock();
+        Reload();
+        then?.Invoke();
+    }
+
+    private void LockAll()
+    {
+        Vaults.LockAll();
+        revealed.Clear();
+        Reload();
+    }
+}

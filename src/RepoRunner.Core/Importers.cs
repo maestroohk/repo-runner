@@ -27,6 +27,32 @@ public static class DotEnv
     public static List<string> Keys(string path) => Parse(File.ReadAllText(path)).Select(p => p.Key).ToList();
 }
 
+/// <summary>Finds files in a repo that hold variables in clear: .env* files and launch profiles with more than one variable.</summary>
+public static class PlaintextFiles
+{
+    public static List<string> Find(string root)
+    {
+        var found = new List<string>();
+        Walk(root, 0, found);
+        return found;
+    }
+
+    private static void Walk(string dir, int depth, List<string> found)
+    {
+        try
+        {
+            found.AddRange(Directory.EnumerateFiles(dir, ".env*").Where(f => !f.EndsWith(".example", StringComparison.OrdinalIgnoreCase)));
+            var launch = Path.Combine(dir, "Properties", "launchSettings.json");
+            if (File.Exists(launch) && LaunchSettings.Read(launch).Any(p => p.Variables.Count > 1)) found.Add(launch);
+            if (depth >= 3) return;
+            foreach (var sub in Directory.EnumerateDirectories(dir))
+                if (Path.GetFileName(sub) is not ("bin" or "obj" or "node_modules" or ".git" or ".vs" or ".idea" or ".venv"))
+                    Walk(sub, depth + 1, found);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { }
+    }
+}
+
 public static class LaunchSettings
 {
     private static readonly JsonDocumentOptions Lenient = new() { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip };

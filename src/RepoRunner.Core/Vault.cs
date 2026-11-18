@@ -138,6 +138,21 @@ public sealed partial class Vault : IDisposable
         return key;
     }
 
+    /// <summary>True when values of this environment can be read without asking for a passphrase.</summary>
+    public bool IsUnlocked(EnvInfo env) => !env.Protected || _envKeys.ContainsKey(env.Id);
+
+    /// <summary>Unlocks a protected environment for this vault instance, or sets its passphrase when it has none yet.</summary>
+    public void Unlock(EnvInfo env, string passphrase)
+    {
+        var previous = PassphrasePrompt;
+        PassphrasePrompt = (_, _) => passphrase;
+        try { KeyFor(env); }
+        finally { PassphrasePrompt = previous; }
+    }
+
+    /// <summary>Forgets the cached key of a protected environment.</summary>
+    public void Lock(EnvInfo env) => _envKeys.Remove(env.Id);
+
     private byte[] DeriveEnvKey(string passphrase, byte[] salt, EnvInfo env) =>
         Kdf.Derive([.. _encKey, .. Kdf.FromPassphrase(passphrase, salt)], $"rr/env/{env.Id}");
 
@@ -284,6 +299,11 @@ public sealed partial class Vault : IDisposable
     public bool RemoveVar(Scope scope, EnvInfo env, string name) =>
         _db.Exec("DELETE FROM variables WHERE scope_kind=$k AND scope_id=$s AND env_id=$e AND name_tag=$t",
             ("$k", scope.Kind), ("$s", scope.Id), ("$e", env.Id), ("$t", Tag(name))) > 0;
+
+    /// <summary>Changes only whether a variable is masked; the value is untouched.</summary>
+    public bool SetSecret(Scope scope, EnvInfo env, string name, bool secret) =>
+        _db.Exec("UPDATE variables SET secret=$x WHERE scope_kind=$k AND scope_id=$s AND env_id=$e AND name_tag=$t",
+            ("$x", secret ? 1 : 0), ("$k", scope.Kind), ("$s", scope.Id), ("$e", env.Id), ("$t", Tag(name))) > 0;
 
     public int CountVars(Scope scope, EnvInfo env) =>
         _db.Query("SELECT COUNT(*) FROM variables WHERE scope_kind=$k AND scope_id=$s AND env_id=$e", r => r.GetInt32(0),

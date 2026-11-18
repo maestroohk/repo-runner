@@ -203,34 +203,13 @@ internal static class Cli
         Console.WriteLine($"Registered {repo.Name} ({repo.Path})");
         PrintTargets(vault, vault.GetRepo(repo.Name));
 
-        var envFiles = FindEnvFiles(repo.Path);
+        var envFiles = PlaintextFiles.Find(repo.Path);
         if (envFiles.Count > 0)
         {
             Console.WriteLine("\nPlaintext variable files found. Import each with: rr import --from <file> --env <ENV>");
             foreach (var file in envFiles) Console.WriteLine($"  {Path.GetRelativePath(repo.Path, file)}");
         }
         return 0;
-    }
-
-    private static List<string> FindEnvFiles(string root)
-    {
-        var found = new List<string>();
-        void Walk(string dir, int depth)
-        {
-            try
-            {
-                found.AddRange(Directory.EnumerateFiles(dir, ".env*").Where(f => !f.EndsWith(".example", StringComparison.OrdinalIgnoreCase)));
-                var launch = Path.Combine(dir, "Properties", "launchSettings.json");
-                if (File.Exists(launch) && LaunchSettings.Read(launch).Any(p => p.Variables.Count > 1)) found.Add(launch);
-                if (depth >= 3) return;
-                foreach (var sub in Directory.EnumerateDirectories(dir))
-                    if (Path.GetFileName(sub) is not ("bin" or "obj" or "node_modules" or ".git" or ".vs" or ".idea" or ".venv"))
-                        Walk(sub, depth + 1);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { }
-        }
-        Walk(root, 0);
-        return found;
     }
 
     private static void PrintTargets(Vault vault, RepoInfo repo)

@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/RepoRunner.App/RepoRunner.App.csproj" />
     <Project Path="src/RepoRunner.Cli/RepoRunner.Cli.csproj" />
     <Project Path="src/RepoRunner.Core/RepoRunner.Core.csproj" />
   </Folder>
