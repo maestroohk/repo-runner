@@ -1291,9 +1291,22 @@
 
     private const string BlazorHub = "Microsoft.AspNetCore.Components.Server.ComponentHub/";
 
-    /// <summary>A Blazor circuit message that did nothing but bookkeeping: no calls, no data, no exception.</summary>
-    private static bool IsChatter(Flow flow) =>
-        flow.Errors.Count == 0 && flow.Notes.Count == 0 && flow.Steps.Count == 1 && flow.Root is { } root && root.Name.StartsWith(BlazorHub);
+    private static readonly string[] AssetEndings =
+        [".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".wasm", ".json"];
+
+    /// <summary>
+    /// Traffic that is plumbing rather than a feature: Blazor's circuit bookkeeping and connection requests, and
+    /// static files. Anything that failed or threw is never treated as plumbing.
+    /// </summary>
+    private static bool IsChatter(Flow flow)
+    {
+        if (flow.Errors.Count > 0 || flow.Notes.Count > 0 || flow.Root is not { } root) return false;
+        if (flow.Steps.Count == 1 && (root.Name.StartsWith(BlazorHub) || root.Name.StartsWith("Circuit "))) return true;
+        if (root.Category != "request" || root.StatusCode >= 400 || flow.Steps.Values.Any(s => s.Failed)) return false;
+        var path = root.Tag("url.path", "http.target") ?? "";
+        return path.StartsWith("/_blazor") || path.StartsWith("/_framework") || path.StartsWith("/_content")
+            || AssetEndings.Any(ending => path.EndsWith(ending, StringComparison.OrdinalIgnoreCase));
+    }
 
     private List<Flow> FlowsInView()
     {
@@ -1316,7 +1329,18 @@
         if (step.Category == "http" && Uri.TryCreate(step.Tag("url.full", "http.url"), UriKind.Absolute, out var uri))
             return (verb, uri.AbsolutePath, uri.Authority);
         var name = step.Title.Length > 0 ? step.Title : step.Name;
-        return (null, name.StartsWith(BlazorHub) ? "Blazor UI event · " + name[BlazorHub.Length..] : name, null);
+        // Blazor names its own activity "Event onclick -> Namespace.Component.Handler" and "Route /path -> Component".
+        if (name.StartsWith("Event ") && name[6..].Split(" -> ", 2) is [var trigger, var handler])
+        {
+            var parts = handler.Split('.');
+            var component = parts.Length > 1 ? parts[^2] : handler;
+            // An inline lambda has a compiler-made name; the component alone says more.
+            var label = parts[^1].StartsWith('<') ? component : $"{component}.{parts[^1]}";
+            return ((trigger.StartsWith("on") ? trigger[2..] : trigger).ToUpperInvariant(), label, null);
+        }
+        if (name.StartsWith("Route ") && name[6..].Split(" -> ", 2) is [var route, _]) return ("NAV", route, null);
+        if (name.StartsWith("Circuit ")) return (null, "Blazor circuit opened", null);
+        return (null, name.StartsWith(BlazorHub) ? "Blazor · " + name[BlazorHub.Length..] : name, null);
     }
 
     private static (string? Verb, string Label, string? Host) Describe(Flow flow) =>

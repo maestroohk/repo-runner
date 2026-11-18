@@ -349,7 +349,8 @@ textarea.input { height: auto; padding: 9px 10px; resize: vertical; font-family:
 .v-post { background: var(--ok-soft); color: var(--ok); }
 .v-put, .v-patch { background: var(--warn-soft); color: var(--warn); }
 .v-delete { background: var(--danger-soft); color: var(--danger); }
-.v-worker { background: rgba(167, 139, 250, .16); color: #a78bfa; }
+.v-worker, .v-click, .v-change, .v-input, .v-submit { background: rgba(167, 139, 250, .16); color: #a78bfa; }
+.v-nav { background: var(--warn-soft); color: var(--warn); }
 
 .flow-list { display: flex; flex-direction: column; gap: 2px; max-height: 460px; overflow-y: auto; }
 .flow-item { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 9px; background: none; text-align: left; }
