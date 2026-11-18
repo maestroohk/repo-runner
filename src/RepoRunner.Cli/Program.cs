@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using RepoRunner.Core;
 
 return await Cli.Run(args);
@@ -7,7 +7,7 @@ internal sealed class Args
 {
     private static readonly HashSet<string> Flags = new(StringComparer.OrdinalIgnoreCase)
     {
-        "reveal", "protected", "clean", "delete-source", "secret", "plain", "yes", "skip-protected", "help",
+        "reveal", "protected", "clean", "no-attach", "delete-source", "secret", "plain", "yes", "skip-protected", "help",
     };
 
     private static readonly Dictionary<string, string> Short = new() { ["-e"] = "env", ["-r"] = "repo", ["-g"] = "group", ["-h"] = "help" };
@@ -72,6 +72,7 @@ internal static class Cli
         Running
           rr run   [target] [--env E] [--set K=V] [--clean] [-- app args]
           rr watch [target] [--env E] ...     same, through dotnet watch
+          rr debug [target] [--env E] ...     start paused, then attach Rider (--no-attach: attach yourself)
           rr exec  [--env E] [--clean] -- <command...>       any command with the environment
 
         Vault
@@ -115,6 +116,7 @@ internal static class Cli
                 "group" => Group(vault, args),
                 "run" => await Start(vault, args, watch: false),
                 "watch" => await Start(vault, args, watch: true),
+                "debug" => await Start(vault, args, watch: false, debug: true),
                 "exec" => await Exec(vault, args),
                 "vault" => VaultCommand(vault, args),
                 "audit" => Audit(vault),
@@ -487,7 +489,7 @@ internal static class Cli
             return eq > 0 ? new KeyValuePair<string, string>(s[..eq], s[(eq + 1)..]) : throw new VaultException($"--set expects KEY=value, got '{s}'.");
         }).ToList();
 
-    private static async Task<int> Start(Vault vault, Args args, bool watch)
+    private static async Task<int> Start(Vault vault, Args args, bool watch, bool debug = false)
     {
         var repo = RepoOf(vault, args);
         var env = EnvOf(vault, args, repo);
@@ -501,8 +503,8 @@ internal static class Cli
         var missing = target.Requires.Where(k => !resolved.Values.ContainsKey(k)).ToList();
         if (missing.Count > 0) Console.Error.WriteLine($"rr: warning: {env.Name} is missing {string.Join(", ", missing)}");
 
-        vault.Audit(watch ? "watch" : "run", repo.Name, env.Name, target.Name);
-        return await Launch(vault, specs, resolved, repo.Name, env, target.Name, args.Has("clean"));
+        vault.Audit(debug ? "debug" : watch ? "watch" : "run", repo.Name, env.Name, target.Name);
+        return await Launch(vault, specs, resolved, repo.Name, env, target.Name, args.Has("clean"), debug ? (repo, target) : null, args.Has("no-attach"));
     }
 
     private static async Task<int> Exec(Vault vault, Args args)
@@ -517,9 +519,21 @@ internal static class Cli
     }
 
     private static async Task<int> Launch(Vault vault, List<ProcessSpec> specs, ResolvedEnvironment resolved, string repoName,
-        EnvInfo env, string targetName, bool clean)
+        EnvInfo env, string targetName, bool clean, (RepoInfo Repo, TargetDef Target)? debug = null, bool noAttach = false)
     {
         var block = Launcher.BuildEnvironment(resolved.Values, clean);
+        TextWriter output = Console.Out;
+        if (debug is { } d)
+        {
+            DebugSupport.Apply(block, d.Repo, d.Target);
+            var solution = DebugSupport.FindSolution(d.Repo, d.Target);
+            output = new DebugWriter(Console.Out, pid =>
+            {
+                if (noAttach) { Console.Error.WriteLine($"rr: attach your debugger to process {pid}"); return; }
+                try { Console.Error.WriteLine("rr: " + DebugSupport.AttachRider(pid, solution)); }
+                catch (VaultException ex) { Console.Error.WriteLine("rr: " + ex.Message); }
+            });
+        }
         block["RR_REPO"] = repoName;
         block["RR_ENV"] = env.Name;
         block["RR_TARGET"] = targetName;
@@ -532,7 +546,7 @@ internal static class Cli
 
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
-        return await Launcher.RunAsync(specs, block, secrets, Console.Out, stop.Token);
+        return await Launcher.RunAsync(specs, block, secrets, output, stop.Token);
     }
 
     // ---------- vault ----------

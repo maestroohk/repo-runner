@@ -3,6 +3,7 @@
     <Project Path="src/RepoRunner.App/RepoRunner.App.csproj" />
     <Project Path="src/RepoRunner.Cli/RepoRunner.Cli.csproj" />
     <Project Path="src/RepoRunner.Core/RepoRunner.Core.csproj" />
+    <Project Path="src/RepoRunner.StartupHook/RepoRunner.StartupHook.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/RepoRunner.Tests/RepoRunner.Tests.csproj" />

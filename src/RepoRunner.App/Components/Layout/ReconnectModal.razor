@@ -1,4 +1,4 @@
-﻿<script type="module" src="@Assets["Components/Layout/ReconnectModal.razor.js"]"></script>
+<script type="module" src="@Assets["Components/Layout/ReconnectModal.razor.js"]"></script>
 
 <dialog id="components-reconnect-modal" data-nosnippet>
     <div class="components-reconnect-container">
@@ -7,13 +7,13 @@
             <div></div>
         </div>
         <p class="components-reconnect-first-attempt-visible">
-            Rejoining the server...
+            Reconnecting to RepoRunner...
         </p>
         <p class="components-reconnect-repeated-attempt-visible">
-            Rejoin failed... trying again in <span id="components-seconds-to-next-attempt"></span> seconds.
+            RepoRunner is not responding. If you closed it, start it again from its shortcut. Retrying in <span id="components-seconds-to-next-attempt"></span> seconds.
         </p>
         <p class="components-reconnect-failed-visible">
-            Failed to rejoin.<br />Please retry or reload the page.
+            RepoRunner is not running.<br />Start it again from its shortcut.
         </p>
         <button id="components-reconnect-button" class="components-reconnect-failed-visible">
             Retry

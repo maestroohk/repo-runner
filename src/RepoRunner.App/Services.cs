@@ -89,9 +89,9 @@ public sealed class RunSession
         }
     }
 
-    public string Text(int last = 600)
+    public List<string> Lines(int last = 800)
     {
-        lock (_lines) return string.Join('\n', _lines.Skip(Math.Max(0, _lines.Count - last)));
+        lock (_lines) return _lines.Skip(Math.Max(0, _lines.Count - last)).ToList();
     }
 }
 
@@ -109,12 +109,12 @@ public sealed class SessionManager
         lock (_sessions) return [.. _sessions];
     }
 
-    public RunSession Start(VaultService vaults, RepoInfo repo, EnvInfo env, TargetDef target, bool watch)
+    public RunSession Start(VaultService vaults, RepoInfo repo, EnvInfo env, TargetDef target, bool watch, bool debug = false)
     {
         if (All().Any(s => s.Running && s.Repo == repo.Name && s.Target == target.Name))
             throw new VaultException($"{target.Name} is already running. Stop it first.");
 
-        var (specs, block, secrets) = vaults.Use(vault =>
+        var (specs, block, secrets, injected) = vaults.Use(vault =>
         {
             var resolved = vault.Resolve(repo, env, target);
             var list = new List<ProcessSpec> { Launcher.ForTarget(repo, target, watch, []) };
@@ -124,8 +124,9 @@ public sealed class SessionManager
             environment["RR_REPO"] = repo.Name;
             environment["RR_ENV"] = env.Name;
             environment["RR_TARGET"] = target.Name;
-            vault.Audit(watch ? "watch" : "run", repo.Name, env.Name, target.Name);
-            return (list, environment, resolved.SecretNames.Select(n => resolved.Values[n]).ToList());
+            if (debug) DebugSupport.Apply(environment, repo, target);
+            vault.Audit(debug ? "debug" : watch ? "watch" : "run", repo.Name, env.Name, target.Name);
+            return (list, environment, resolved.SecretNames.Select(n => resolved.Values[n]).ToList(), resolved.Values.Count);
         });
 
         var session = new RunSession
@@ -134,18 +135,31 @@ public sealed class SessionManager
             Target = target.Name,
             Env = env.Name,
             Protected = env.Protected,
-            Labels = string.Join(" + ", specs.Select(s => s.Label)) + (watch ? " (watch)" : ""),
+            Labels = string.Join(" + ", specs.Select(s => s.Label)) + (debug ? " (debug)" : watch ? " (watch)" : ""),
             Url = target.Urls?.Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(),
         };
         lock (_sessions) _sessions.Add(session);
-        session.Append($"Starting {session.Labels} on {env.Name} with {block.Count(p => !p.Key.StartsWith("RR_"))} variables in the environment...");
+        session.Append($"Starting {session.Labels} on {env.Name} with {injected} variables from the vault...");
         Interlocked.Increment(ref _version);
+
+        TextWriter output = new LineWriter(session, this);
+        if (debug)
+        {
+            session.Append("The app will pause before its first line of code until the debugger is attached.");
+            var solution = DebugSupport.FindSolution(repo, target);
+            var lines = output;
+            output = new DebugWriter(lines, pid =>
+            {
+                try { lines.WriteLine(DebugSupport.AttachRider(pid, solution)); }
+                catch (VaultException ex) { lines.WriteLine(ex.Message); }
+            });
+        }
 
         _ = Task.Run(async () =>
         {
             try
             {
-                session.ExitCode = await Launcher.RunAsync(specs, block, secrets, new LineWriter(session, this), session.Stop.Token,
+                session.ExitCode = await Launcher.RunAsync(specs, block, secrets, output, session.Stop.Token,
                     grace: TimeSpan.Zero, hideWindows: true);
                 session.Append(session.StopRequested ? "Stopped." : $"Exited with code {session.ExitCode}.");
             }
@@ -182,6 +196,8 @@ public sealed class SessionManager
 
         public override void WriteLine(string? value)
         {
+            // Killed processes complain about closed pipes on the way out; that noise is not worth showing.
+            if (session.StopRequested) return;
             session.Append(value ?? "");
             Interlocked.Increment(ref owner._version);
         }

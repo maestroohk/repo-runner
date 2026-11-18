@@ -1,4 +1,4 @@
-﻿@page "/"
+@page "/"
 @implements IDisposable
 @inject VaultService Vaults
 @inject SessionManager Sessions
@@ -7,322 +7,427 @@
 
 <PageTitle>RepoRunner</PageTitle>
 
-<div class="shell">
-    <header class="top">
-        <div class="brand">RepoRunner</div>
-        <div class="muted small">@Vaults.VaultFile</div>
-        <span class="spacer"></span>
-        @foreach (var name in unlocked)
-        {
-            <span class="chip danger">@name unlocked</span>
-        }
-        @if (unlocked.Count > 0)
-        {
-            <button class="btn" @onclick="LockAll">Lock now</button>
-        }
-        <button class="btn" @onclick="@(() => Confirm("quit", Quit))">@(confirmKey == "quit" ? "Click again to quit" : "Quit")</button>
-    </header>
+<div class="app">
+    <aside class="sidebar">
+        <div class="brand"><span class="logo"><Icon Name="play" Size="12" /></span>RepoRunner</div>
 
-    <aside class="side">
-        <div class="side-title">Repos</div>
+        <div class="nav-label">
+            Repositories
+            <button class="icon-btn" title="Add a repo" @onclick="OpenAdd"><Icon Name="plus" /></button>
+        </div>
+
         @foreach (var r in repos)
         {
-            var running = sessions.Count(s => s.Running && s.Repo == r.Name);
-            <button class="repo @(repo?.Id == r.Id ? "active" : "")" @onclick="() => SelectRepo(r)">
-                <span class="repo-name">@r.Name</span>
-                @if (running > 0)
+            var running = sessions.Any(s => s.Running && s.Repo == r.Name);
+            <button class="repo-item @(repo?.Id == r.Id ? "active" : "")" @onclick="() => SelectRepo(r)">
+                <span class="avatar" style="--hue:@Hue(r.Name)">@Initials(r.Name)</span>
+                <span class="repo-text">
+                    <span class="repo-name">@r.Name</span>
+                    <span class="repo-sub">@(running ? "running" : r.DefaultEnv ?? "not run yet")</span>
+                </span>
+                @if (running)
                 {
-                    <span class="dot" title="@running running"></span>
+                    <span class="pulse"></span>
                 }
             </button>
         }
-        @if (repos.Count == 0)
+        @if (repos.Count == 0 && !showAdd)
         {
-            <div class="muted small pad">No repos yet.</div>
+            <div class="side-empty">No repositories yet.</div>
         }
 
         @if (showAdd)
         {
             <div class="add-form">
-                <label>Folder of the repo</label>
-                <input class="input" list="repo-folders" placeholder="C:\Users\...\source\repos\MyApi" @bind="addPath" @bind:event="oninput" />
+                <label class="field">
+                    <span>Repo folder</span>
+                    <input class="input" list="repo-folders" placeholder="C:\...\source\repos\MyApi" @bind="addPath" @bind:event="oninput" />
+                </label>
                 <datalist id="repo-folders">
                     @foreach (var folder in folderSuggestions)
                     {
                         <option value="@folder"></option>
                     }
                 </datalist>
-                <label>Name (optional)</label>
-                <input class="input" placeholder="taken from the folder" @bind="addName" />
+                <label class="field">
+                    <span>Name (optional)</span>
+                    <input class="input" placeholder="taken from the folder" @bind="addName" />
+                </label>
                 <div class="row">
-                    <button class="btn primary" @onclick="AddRepo">Add repo</button>
-                    <button class="btn" @onclick="() => showAdd = false">Cancel</button>
+                    <button class="btn primary small" @onclick="AddRepo">Add repo</button>
+                    <button class="btn small" @onclick="() => showAdd = false">Cancel</button>
                 </div>
             </div>
         }
-        else
-        {
-            <button class="btn wide" @onclick="OpenAdd">+ Add repo</button>
-        }
+
+        <div class="sidebar-foot">
+            <div class="vault-pill" title="@Vaults.VaultFile"><Icon Name="shield" /> Vault encrypted</div>
+            @if (unlocked.Count > 0)
+            {
+                <button class="foot-btn danger" @onclick="LockAll"><Icon Name="lock" /> Lock @string.Join(", ", unlocked) now</button>
+            }
+            <button class="foot-btn" @onclick="@(() => Confirm("quit", Quit))">
+                <Icon Name="power" /> @(confirmKey == "quit" ? "Click again to quit" : "Quit RepoRunner")
+            </button>
+        </div>
     </aside>
 
-    <main class="main">
-        @if (message is not null)
-        {
-            <div class="banner @(messageIsError ? "error" : "ok")">
-                <span>@message</span>
-                <button class="link" @onclick="() => message = null">Dismiss</button>
-            </div>
-        }
-
+    <main class="content">
         @if (repo is null)
         {
-            <div class="empty">
-                <h1>Add your first repo</h1>
-                <p>RepoRunner keeps each repo's variables in an encrypted vault and starts the app with them. Choose "Add repo" on the left and paste the repo's folder.</p>
+            <div class="welcome">
+                <span class="logo"><Icon Name="play" Size="22" /></span>
+                <h1>Run any repo on any environment</h1>
+                <p>RepoRunner keeps each repo's variables in an encrypted vault and starts the app with them. No .env files, nothing set in Windows.</p>
+                <button class="btn primary" @onclick="OpenAdd"><Icon Name="plus" /> Add your first repo</button>
             </div>
         }
         else
         {
-            <section class="head">
-                <div>
-                    <h1>@repo.Name</h1>
-                    <div class="muted small">@repo.Path</div>
-                </div>
-            </section>
+            <div class="content-inner">
+                <header class="page-head">
+                    <div class="title-block">
+                        <span class="avatar lg" style="--hue:@Hue(repo.Name)">@Initials(repo.Name)</span>
+                        <div>
+                            <h1>@repo.Name</h1>
+                            <div class="path"><Icon Name="folder" Size="13" /> @repo.Path</div>
+                        </div>
+                    </div>
+                    <div class="env-switch" role="tablist" aria-label="Environment">
+                        @foreach (var e in envs)
+                        {
+                            <button class="env-opt tone-@Tone(e) @(e.Name == envName ? "active" : "")" role="tab" title="@EnvTitle(e)" @onclick="() => SelectEnv(e.Name)">
+                                <span class="env-dot"></span>
+                                @e.Name
+                                @if (e.Protected)
+                                {
+                                    <Icon Name="@(Vaults.IsUnlocked(e) ? "unlock" : "lock")" Size="12" />
+                                }
+                                <span class="env-count">@(counts.GetValueOrDefault(e.Name))</span>
+                            </button>
+                        }
+                    </div>
+                </header>
 
-            <section class="card">
-                <div class="card-title">Environment</div>
-                <div class="envs">
-                    @foreach (var e in envs)
+                <section class="targets">
+                    @if (targets.Count == 0)
                     {
-                        <button class="env @(e.Name == envName ? "active" : "") @(e.Protected ? "protected" : "")" @onclick="() => SelectEnv(e.Name)">
-                            <span>@e.Name</span>
-                            <span class="count">@(counts.GetValueOrDefault(e.Name))</span>
-                            @if (e.Protected)
+                        <div class="panel">
+                            <div class="state">
+                                <span class="glyph"><Icon Name="terminal" Size="22" /></span>
+                                <h3>No run targets found</h3>
+                                <p>No runnable .NET project or npm dev script was detected in this folder.</p>
+                            </div>
+                        </div>
+                    }
+                    @foreach (var t in targets)
+                    {
+                        var live = sessions.FirstOrDefault(s => s.Running && s.Repo == repo.Name && s.Target == t.Name);
+                        var missing = locked ? [] : t.Requires.Where(k => !vars.Any(v => v.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList();
+                        <article class="target-card @(live is not null ? "live" : "")">
+                            <div class="target-icon kind-@t.Kind">@(t.Kind == "dotnet" ? ".NET" : t.Kind == "node" ? "npm" : ">_")</div>
+                            <div class="target-body">
+                                <div class="target-title">
+                                    @t.Name
+                                    @if (t.Name.Equals(repo.DefaultTarget, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <span class="badge accent">default</span>
+                                    }
+                                </div>
+                                <div class="target-sub">
+                                    @(t.Kind == "dotnet" ? t.Project : t.Kind == "node" ? $"npm run {t.Script}" : $"{t.Command} {string.Join(' ', t.Args)}")
+                                    @if (t.Companions.Count > 0)
+                                    {
+                                        <span> · with @string.Join(", ", t.Companions)</span>
+                                    }
+                                </div>
+                                @if (missing.Count > 0)
+                                {
+                                    <div class="target-warn"><Icon Name="alert" Size="14" /> @envName is missing @string.Join(", ", missing)</div>
+                                }
+                            </div>
+                            <div class="target-actions">
+                                @if (live is not null)
+                                {
+                                    <span class="live-pill"><span class="pulse"></span> @live.Env · @Elapsed(live)</span>
+                                    @if (live.Url is not null)
+                                    {
+                                        <a class="btn" href="@live.Url" target="_blank" rel="noopener">Open app <Icon Name="external" Size="14" /></a>
+                                    }
+                                    <button class="btn stop" @onclick="() => StopSession(live)"><Icon Name="stop" Size="12" /> Stop</button>
+                                }
+                                else
+                                {
+                                    <button class="btn @(IsConfirming(t, "Run") ? "confirm" : "run")" @onclick="@(() => Run(t, "Run"))">
+                                        <Icon Name="play" Size="12" /> @RunLabel(t, "Run")
+                                    </button>
+                                    @if (t.Kind == "dotnet")
+                                    {
+                                        <button class="btn @(IsConfirming(t, "Debug") ? "confirm" : "")" title="Start paused and attach Rider's debugger" @onclick="@(() => Run(t, "Debug"))">
+                                            <Icon Name="bug" Size="15" /> @RunLabel(t, "Debug")
+                                        </button>
+                                        <button class="btn @(IsConfirming(t, "Watch") ? "confirm" : "")" title="dotnet watch: rebuilds when files change" @onclick="@(() => Run(t, "Watch"))">
+                                            <Icon Name="refresh" Size="14" /> @RunLabel(t, "Watch")
+                                        </button>
+                                    }
+                                }
+                            </div>
+                        </article>
+                    }
+                </section>
+
+                <section class="panel">
+                    <div class="panel-tabs" role="tablist">
+                        <button class="ptab @(tab == "vars" ? "active" : "")" @onclick="@(() => tab = "vars")">
+                            <Icon Name="key" /> Variables <span class="tab-count">@(locked ? "–" : vars.Count.ToString())</span>
+                        </button>
+                        <button class="ptab @(tab == "output" ? "active" : "")" @onclick="@(() => tab = "output")">
+                            <Icon Name="terminal" /> Output
+                            @if (RepoSessions.Any(s => s.Running))
                             {
-                                <span class="lock">@(Vaults.IsUnlocked(e) ? "unlocked" : "locked")</span>
+                                <span class="pulse"></span>
                             }
                         </button>
-                    }
-                </div>
-            </section>
-
-            <section class="card">
-                <div class="card-title">Run on @envName</div>
-                @if (targets.Count == 0)
-                {
-                    <div class="muted">No run targets were detected in this repo.</div>
-                }
-                @foreach (var t in targets)
-                {
-                    var live = sessions.FirstOrDefault(s => s.Running && s.Repo == repo.Name && s.Target == t.Name);
-                    var missing = locked ? [] : t.Requires.Where(k => !vars.Any(v => v.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList();
-                    <div class="target">
-                        <div class="target-info">
-                            <div class="target-name">
-                                @t.Name
-                                <span class="chip">@t.Kind</span>
-                                @if (t.Name.Equals(repo.DefaultTarget, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    <span class="chip">default</span>
-                                }
-                            </div>
-                            <div class="muted small">
-                                @(t.Kind == "dotnet" ? t.Project : t.Kind == "node" ? $"npm run {t.Script} in {t.Cwd}" : $"{t.Command} {string.Join(' ', t.Args)}")
-                                @if (t.Companions.Count > 0)
-                                {
-                                    <span> · starts with @string.Join(", ", t.Companions)</span>
-                                }
-                            </div>
-                            @if (missing.Count > 0)
+                        <button class="ptab @(tab == "files" ? "active" : "")" @onclick="@(() => tab = "files")">
+                            <Icon Name="file" /> Plaintext files
+                            @if (files.Count > 0)
                             {
-                                <div class="warn small">@envName is missing: @string.Join(", ", missing)</div>
+                                <span class="tab-count warn">@files.Count</span>
                             }
-                        </div>
-                        <div class="target-actions">
-                            @if (live is not null)
+                        </button>
+                    </div>
+
+                    <div class="panel-body">
+                        @if (tab == "output")
+                        {
+                            @if (RepoSessions.Count == 0)
                             {
-                                <span class="status"><span class="dot"></span> on @live.Env · @Elapsed(live)</span>
-                                @if (live.Url is not null)
-                                {
-                                    <a class="btn" href="@live.Url" target="_blank">Open @live.Url</a>
-                                }
-                                <button class="btn danger" @onclick="() => StopSession(live)">Stop</button>
+                                <div class="state">
+                                    <span class="glyph"><Icon Name="terminal" Size="22" /></span>
+                                    <h3>Nothing has run yet</h3>
+                                    <p>Press Run on a target above. Its output streams here, with secret values masked.</p>
+                                </div>
                             }
                             else
                             {
-                                <button class="btn primary" @onclick="() => Run(t, false)">@RunLabel(t, false)</button>
-                                @if (t.Kind == "dotnet")
+                                var view = LogView();
+                                <div class="toolbar">
+                                    @foreach (var s in RepoSessions)
+                                    {
+                                        <button class="session-chip @(s.Id == shown?.Id ? "active" : "")" @onclick="() => shown = s">
+                                            @if (s.Running)
+                                            {
+                                                <span class="pulse"></span>
+                                            }
+                                            @s.Labels · @s.Env@(s.Running ? "" : " · ended")
+                                        </button>
+                                    }
+                                    <span class="spacer"></span>
+                                    <label class="check"><input type="checkbox" @bind="hideWarnings" /> Hide build warnings@(view.Hidden > 0 ? $" ({view.Hidden})" : "")</label>
+                                    @if (shown is { Running: false })
+                                    {
+                                        <button class="btn small" @onclick="() => Dismiss(shown)">Clear</button>
+                                    }
+                                </div>
+                                <div class="terminal">
+                                    <div class="terminal-bar">
+                                        <span class="terminal-dots"><i></i><i></i><i></i></span>
+                                        <span>@(shown is null ? "" : $"{shown.Repo} · {shown.Labels} · {shown.Env} · started {shown.Started:HH:mm:ss}")</span>
+                                    </div>
+                                    <div class="log" @ref="logElement">
+                                        @foreach (var line in view.Lines)
+                                        {
+                                            <div class="ln @line.Kind">@if (line.Tag is not null){<span class="tag t@(line.TagIndex)">@line.Tag</span>}@line.Text</div>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                        }
+                        else if (locked)
+                        {
+                            <div class="state locked">
+                                <span class="glyph"><Icon Name="lock" Size="22" /></span>
+                                <h3>@envName is protected</h3>
+                                <p>Its values stay encrypted until you enter the passphrase. They then stay unlocked for @(VaultService.UnlockWindow.TotalMinutes.ToString("0")) minutes, in memory only.</p>
+                                <button class="btn primary" @onclick="() => OpenUnlock(null)">
+                                    <Icon Name="unlock" /> @(CurrentEnv.HasPassphrase ? $"Unlock {envName}" : "Set a passphrase")
+                                </button>
+                            </div>
+                        }
+                        else if (tab == "files")
+                        {
+                            @if (files.Count == 0)
+                            {
+                                <div class="state good">
+                                    <span class="glyph"><Icon Name="shield" Size="22" /></span>
+                                    <h3>No plaintext variable files</h3>
+                                    <p>This repo has no .env files or launch profiles carrying variables. The vault is the only source.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="callout">
+                                    <Icon Name="alert" />
+                                    <div>These files hold variables in plain text. Import them into @envName, then delete the file so the vault is the only copy. An app that loads a .env at startup will prefer the file while it exists.</div>
+                                </div>
+                                @foreach (var f in files)
                                 {
-                                    <button class="btn" @onclick="() => Run(t, true)">@RunLabel(t, true)</button>
+                                    <div class="file-row">
+                                        <span class="file-glyph"><Icon Name="file" Size="18" /></span>
+                                        <div class="file-body">
+                                            <div class="file-name">@f.Relative</div>
+                                            <div class="file-sub">
+                                                @if (f.Profile is not null)
+                                                {
+                                                    <span>profile "@f.Profile" ·</span>
+                                                }
+                                                <span>@f.Pairs.Count variables</span>
+                                                @if (f.InVault)
+                                                {
+                                                    <span class="badge ok"><Icon Name="check" Size="11" /> all in @envName</span>
+                                                }
+                                            </div>
+                                        </div>
+                                        @if (!f.InVault)
+                                        {
+                                            <button class="btn small" @onclick="() => ImportFile(f)"><Icon Name="download" Size="14" /> Import into @envName</button>
+                                        }
+                                        else if (f.Profile is null)
+                                        {
+                                            <button class="btn small @(confirmKey == "file:" + f.Path ? "confirm" : "stop")" @onclick="@(() => Confirm("file:" + f.Path, () => DeleteFile(f)))">
+                                                <Icon Name="trash" Size="14" /> @(confirmKey == "file:" + f.Path ? "Click again to delete" : "Delete file")
+                                            </button>
+                                        }
+                                    </div>
                                 }
                             }
-                        </div>
-                    </div>
-                }
-            </section>
+                        }
+                        else
+                        {
+                            <div class="toolbar">
+                                <div class="search">
+                                    <Icon Name="search" />
+                                    <input class="input" placeholder="Filter variables" @bind="filter" @bind:event="oninput" />
+                                </div>
+                                <span class="spacer"></span>
+                                <button class="btn small" @onclick="() => showPaste = !showPaste"><Icon Name="clipboard" Size="14" /> Paste .env</button>
+                                <button class="btn primary small" @onclick="NewVariable"><Icon Name="plus" Size="14" /> Add variable</button>
+                            </div>
 
-            @if (RepoSessions.Count > 0)
-            {
-                <section class="card">
-                    <div class="card-title">Output</div>
-                    <div class="tabs">
-                        @foreach (var s in RepoSessions)
-                        {
-                            <button class="tab @(s.Id == shown?.Id ? "active" : "")" @onclick="() => shown = s">
-                                @if (s.Running)
-                                {
-                                    <span class="dot"></span>
-                                }
-                                @s.Labels · @s.Env @(s.Running ? "" : "(ended)")
-                            </button>
-                        }
-                        <span class="spacer"></span>
-                        @if (shown is { Running: false })
-                        {
-                            <button class="link" @onclick="() => Dismiss(shown)">Clear</button>
+                            @if (showPaste)
+                            {
+                                <div class="form-card">
+                                    <label class="field">
+                                        <span>Paste KEY=VALUE lines. They are stored encrypted for @envName and never written to a file.</span>
+                                        <textarea class="input" rows="6" @bind="pasteText" placeholder="OpsApiBaseUrl=https://...&#10;ApiPassword=..."></textarea>
+                                    </label>
+                                    <div class="row">
+                                        <button class="btn primary small" @onclick="ImportPaste">Import into @envName</button>
+                                        <button class="btn small" @onclick="() => showPaste = false">Cancel</button>
+                                    </div>
+                                </div>
+                            }
+
+                            @if (editing)
+                            {
+                                <div class="form-card">
+                                    <div class="grid2">
+                                        <label class="field">
+                                            <span>Name</span>
+                                            <input class="input mono" @bind="formName" disabled="@formIsEdit" placeholder="OpsApiBaseUrl" />
+                                        </label>
+                                        <label class="field">
+                                            <span>Value for @envName</span>
+                                            <input class="input mono" type="@(formSecret ? "password" : "text")" @bind="formValue" autocomplete="off" />
+                                        </label>
+                                    </div>
+                                    <label class="check"><input type="checkbox" @bind="formSecret" /> Secret — masked on screen and in output</label>
+                                    <div class="row">
+                                        <button class="btn primary small" @onclick="SaveVariable">Save</button>
+                                        <button class="btn small" @onclick="() => editing = false">Cancel</button>
+                                    </div>
+                                </div>
+                            }
+
+                            @if (vars.Count == 0)
+                            {
+                                <div class="state">
+                                    <span class="glyph"><Icon Name="key" Size="22" /></span>
+                                    <h3>No variables for @envName yet</h3>
+                                    <p>Add one, paste a .env block, or import a file from the Plaintext files tab.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <table class="vars">
+                                    <thead>
+                                        <tr><th>Name</th><th>Value</th><th>Source</th><th></th></tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var v in FilteredVars)
+                                        {
+                                            var own = v.Origin == "repo";
+                                            var open = revealed.Contains(v.Name);
+                                            <tr @key="v.Name">
+                                                <td class="name">
+                                                    <span class="name-cell">
+                                                        @if (v.Secret)
+                                                        {
+                                                            <Icon Name="lock" Size="12" />
+                                                        }
+                                                        @v.Name
+                                                    </span>
+                                                </td>
+                                                <td class="value @(v.Secret && !open ? "masked" : "")">@(v.Secret && !open ? "••••••••••" : v.Value)</td>
+                                                <td><span class="badge">@v.Origin</span></td>
+                                                <td class="tools">
+                                                    @if (v.Secret)
+                                                    {
+                                                        <button class="icon-btn @(open ? "on" : "")" title="@(open ? "Hide value" : "Show value")" @onclick="() => ToggleReveal(v)"><Icon Name="@(open ? "eye-off" : "eye")" /></button>
+                                                    }
+                                                    @if (own)
+                                                    {
+                                                        <button class="icon-btn @(v.Secret ? "on" : "")" title="@(v.Secret ? "Secret: click to treat as a plain value" : "Plain value: click to mark as secret")" @onclick="() => ToggleSecret(v)"><Icon Name="@(v.Secret ? "lock" : "unlock")" /></button>
+                                                        <button class="icon-btn" title="Edit" @onclick="() => EditVariable(v)"><Icon Name="pencil" /></button>
+                                                        @if (confirmKey == "var:" + v.Name)
+                                                        {
+                                                            <button class="icon-btn sure" @onclick="@(() => Confirm("var:" + v.Name, () => DeleteVariable(v)))"><Icon Name="trash" Size="13" /> Delete?</button>
+                                                        }
+                                                        else
+                                                        {
+                                                            <button class="icon-btn danger" title="Delete" @onclick="@(() => Confirm("var:" + v.Name, () => DeleteVariable(v)))"><Icon Name="trash" /></button>
+                                                        }
+                                                    }
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
                         }
                     </div>
-                    @if (shown is not null)
-                    {
-                        <pre class="log" @ref="logElement">@shown.Text()</pre>
-                    }
                 </section>
-            }
-
-            <section class="card">
-                <div class="card-title">
-                    Variables for @envName
-                    <span class="spacer"></span>
-                    @if (!locked)
-                    {
-                        <button class="btn" @onclick="NewVariable">+ Add variable</button>
-                        <button class="btn" @onclick="() => showPaste = !showPaste">Paste a .env block</button>
-                    }
-                </div>
-
-                @if (locked)
-                {
-                    <div class="locked">
-                        <div>@envName is protected. Its values stay encrypted until you enter the passphrase.</div>
-                        <button class="btn primary" @onclick="() => OpenUnlock(null)">@(CurrentEnv.HasPassphrase ? "Unlock" : "Set a passphrase")</button>
-                    </div>
-                }
-                else
-                {
-                    @foreach (var f in files)
-                    {
-                        <div class="file">
-                            <div>
-                                <span class="mono">@f.Relative</span>
-                                @if (f.Profile is not null)
-                                {
-                                    <span class="muted"> · profile "@f.Profile"</span>
-                                }
-                                <span class="muted small"> · @f.Pairs.Count variables in plain text</span>
-                                @if (f.InVault)
-                                {
-                                    <span class="chip good">all in @envName</span>
-                                }
-                            </div>
-                            <div class="row">
-                                @if (!f.InVault)
-                                {
-                                    <button class="btn" @onclick="() => ImportFile(f)">Import into @envName</button>
-                                }
-                                else if (f.Profile is null)
-                                {
-                                    <button class="btn danger" @onclick="@(() => Confirm("file:" + f.Path, () => DeleteFile(f)))">
-                                        @(confirmKey == "file:" + f.Path ? "Click again to delete the file" : "Delete file")
-                                    </button>
-                                }
-                            </div>
-                        </div>
-                    }
-
-                    @if (showPaste)
-                    {
-                        <div class="form">
-                            <label>Paste KEY=VALUE lines. They are stored for @envName and never written to a file.</label>
-                            <textarea class="input area" rows="6" @bind="pasteText" placeholder="OpsApiBaseUrl=https://...&#10;ApiPassword=..."></textarea>
-                            <div class="row">
-                                <button class="btn primary" @onclick="ImportPaste">Import into @envName</button>
-                                <button class="btn" @onclick="() => showPaste = false">Cancel</button>
-                            </div>
-                        </div>
-                    }
-
-                    @if (editing)
-                    {
-                        <div class="form">
-                            <div class="grid2">
-                                <div>
-                                    <label>Name</label>
-                                    <input class="input mono" @bind="formName" disabled="@formIsEdit" placeholder="OpsApiBaseUrl" />
-                                </div>
-                                <div>
-                                    <label>Value</label>
-                                    <input class="input mono" type="@(formSecret ? "password" : "text")" @bind="formValue" autocomplete="off" />
-                                </div>
-                            </div>
-                            <label class="check"><input type="checkbox" @bind="formSecret" /> Secret (masked on screen and in output)</label>
-                            <div class="row">
-                                <button class="btn primary" @onclick="SaveVariable">Save</button>
-                                <button class="btn" @onclick="() => editing = false">Cancel</button>
-                            </div>
-                        </div>
-                    }
-
-                    @if (vars.Count == 0)
-                    {
-                        <div class="muted pad">No variables for @envName yet. Import a file above, paste a block, or add one.</div>
-                    }
-                    else
-                    {
-                        <table class="vars">
-                            <thead>
-                                <tr><th>Name</th><th>Value</th><th>From</th><th></th></tr>
-                            </thead>
-                            <tbody>
-                                @foreach (var v in vars)
-                                {
-                                    var own = v.Origin == "repo";
-                                    <tr @key="v.Name">
-                                        <td class="mono">@v.Name</td>
-                                        <td class="mono value">@(v.Secret && !revealed.Contains(v.Name) ? "••••••••" : v.Value)</td>
-                                        <td class="muted small">@v.Origin</td>
-                                        <td class="actions">
-                                            @if (v.Secret)
-                                            {
-                                                <button class="link" @onclick="() => ToggleReveal(v)">@(revealed.Contains(v.Name) ? "Hide" : "Show")</button>
-                                            }
-                                            @if (own)
-                                            {
-                                                <button class="link" @onclick="() => ToggleSecret(v)">@(v.Secret ? "Not secret" : "Mark secret")</button>
-                                                <button class="link" @onclick="() => EditVariable(v)">Edit</button>
-                                                <button class="link danger" @onclick="@(() => Confirm("var:" + v.Name, () => DeleteVariable(v)))">
-                                                    @(confirmKey == "var:" + v.Name ? "Click again" : "Delete")
-                                                </button>
-                                            }
-                                        </td>
-                                    </tr>
-                                }
-                            </tbody>
-                        </table>
-                    }
-                }
-            </section>
+            </div>
         }
     </main>
 </div>
+
+@if (message is not null)
+{
+    <div class="toast @(messageIsError ? "error" : "ok")" role="status">
+        <Icon Name="@(messageIsError ? "alert" : "check")" />
+        <span>@message</span>
+        <button class="icon-btn" title="Dismiss" @onclick="() => message = null"><Icon Name="x" Size="14" /></button>
+    </div>
+}
 
 @if (showUnlock)
 {
     <div class="overlay">
         <div class="dialog">
+            <span class="glyph"><Icon Name="lock" Size="20" /></span>
             <h2>@(CurrentEnv.HasPassphrase ? $"Unlock {envName}" : $"Set a passphrase for {envName}")</h2>
-            <p class="muted">
+            <p>
                 @(CurrentEnv.HasPassphrase
                     ? $"Stays unlocked for {VaultService.UnlockWindow.TotalMinutes:0} minutes, in memory only."
                     : "At least 8 characters. There is no recovery if it is forgotten.")
@@ -334,7 +439,7 @@
             }
             @if (unlockError is not null)
             {
-                <div class="warn">@unlockError</div>
+                <div class="error-text">@unlockError</div>
             }
             <div class="row end">
                 <button class="btn" @onclick="CloseUnlock">Cancel</button>
@@ -364,8 +469,15 @@
     private RunSession? shown;
     private ElementReference logElement;
 
+    private sealed record LogLine(string? Tag, int TagIndex, string Text, string Kind);
+
+    private string tab = "vars";
+    private string filter = "";
+    private bool hideWarnings = true;
+
     private string? message;
     private bool messageIsError;
+    private DateTime messageAt;
     private string? confirmKey;
 
     private bool showAdd;
@@ -396,11 +508,12 @@
         timer = new Timer(_ =>
         {
             var version = Sessions.Version;
-            if (version == seenVersion && !sessions.Any(s => s.Running) && unlocked.Count == 0) return;
+            if (version == seenVersion && !sessions.Any(s => s.Running) && unlocked.Count == 0 && message is null) return;
             seenVersion = version;
             InvokeAsync(() =>
             {
                 sessions = Sessions.All();
+                if (message is not null && !messageIsError && DateTime.Now - messageAt > TimeSpan.FromSeconds(6)) message = null;
                 var nowUnlocked = Vaults.UnlockedNames();
                 if (nowUnlocked.Count != unlocked.Count) Reload(); // a protected environment just timed out
                 StateHasChanged();
@@ -410,7 +523,7 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (shown is { Running: true }) await JS.InvokeVoidAsync("rrScrollEnd", logElement);
+        if (tab == "output" && shown is { Running: true }) await JS.InvokeVoidAsync("rrScrollEnd", logElement);
     }
 
     public void Dispose() => timer?.Dispose();
@@ -483,7 +596,61 @@
 
     // ---------- small helpers ----------
 
-    private void Say(string text, bool error = false) => (message, messageIsError) = (text, error);
+    private void Say(string text, bool error = false) => (message, messageIsError, messageAt) = (text, error, DateTime.Now);
+
+    private IEnumerable<Variable> FilteredVars => string.IsNullOrWhiteSpace(filter)
+        ? vars
+        : vars.Where(v => v.Name.Contains(filter.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    private static string Initials(string name)
+    {
+        var caps = new string(name.Where(char.IsUpper).Take(2).ToArray());
+        return caps.Length == 2 ? caps : name[..Math.Min(2, name.Length)].ToUpperInvariant();
+    }
+
+    private static int Hue(string name) => (int)(name.Aggregate(17u, (h, c) => h * 31 + c) % 360);
+
+    private static string Tone(EnvInfo env) => env.Protected ? "red" : env.Name switch
+    {
+        "LOCAL" => "slate",
+        "DEV" => "sky",
+        "UAT" => "amber",
+        "STAGING" => "violet",
+        _ => "teal",
+    };
+
+    private string EnvTitle(EnvInfo env) =>
+        env.Protected ? $"{env.Name}: protected by a passphrase" : $"{env.Name}: {counts.GetValueOrDefault(env.Name)} variables of this repo";
+
+    private bool IsConfirming(TargetDef target, string mode) => confirmKey == $"run:{target.Name}:{mode}";
+
+    /// <summary>The visible lines of the selected session, classified for colour, plus how many warnings were hidden.</summary>
+    private (List<LogLine> Lines, int Hidden) LogView()
+    {
+        var lines = new List<LogLine>();
+        var tags = new List<string>();
+        var hidden = 0;
+        foreach (var raw in shown?.Lines() ?? [])
+        {
+            string? tag = null;
+            var text = raw;
+            var close = raw.IndexOf("] ", StringComparison.Ordinal);
+            if (raw.StartsWith('[') && close is > 1 and < 32 && !raw.StartsWith("[rr-debug]"))
+            {
+                tag = raw[1..close].Trim();
+                text = raw[(close + 2)..];
+                if (!tags.Contains(tag)) tags.Add(tag);
+            }
+            var kind =
+                text.Contains(": warning ") ? "warn"
+                : text.Contains(": error ") || text.Contains("Unhandled exception") || text.Contains(" ERR]") || text.StartsWith("fail:") || text.StartsWith("Failed:") ? "err"
+                : text.Contains("Now listening on") || text.Contains("started successfully") || text.Contains("debugger attached") ? "ok"
+                : tag is null ? "sys" : "";
+            if (kind == "warn" && hideWarnings) { hidden++; continue; }
+            lines.Add(new LogLine(tag, tag is null ? 0 : tags.IndexOf(tag) % 4, text, kind));
+        }
+        return (lines, hidden);
+    }
 
     private void Try(Action work)
     {
@@ -504,11 +671,8 @@
         return span.TotalHours >= 1 ? span.ToString(@"h\:mm\:ss") : span.ToString(@"m\:ss");
     }
 
-    private string RunLabel(TargetDef target, bool watch)
-    {
-        var verb = watch ? "Watch" : "Run";
-        return confirmKey == $"run:{target.Name}:{watch}" ? $"Click again to {verb.ToLowerInvariant()} on {envName}" : verb;
-    }
+    private string RunLabel(TargetDef target, string mode) =>
+        confirmKey == $"run:{target.Name}:{mode}" ? $"Click again to {mode.ToLowerInvariant()} on {envName}" : mode;
 
     // ---------- repos and environments ----------
 
@@ -520,7 +684,9 @@
         editing = showPaste = false;
         confirmKey = null;
         shown = null;
+        filter = "";
         LoadRepo();
+        tab = RepoSessions.Any(s => s.Running) ? "output" : "vars";
     }
 
     private void SelectEnv(string name)
@@ -567,16 +733,17 @@
 
     // ---------- running ----------
 
-    private void Run(TargetDef target, bool watch)
+    private void Run(TargetDef target, string mode)
     {
         var env = CurrentEnv;
-        if (!Vaults.IsUnlocked(env)) { OpenUnlock(() => Run(target, watch)); return; }
-        var key = $"run:{target.Name}:{watch}";
+        if (!Vaults.IsUnlocked(env)) { OpenUnlock(() => Run(target, mode)); return; }
+        var key = $"run:{target.Name}:{mode}";
         if (env.Protected && confirmKey != key) { confirmKey = key; return; }
         confirmKey = null;
         Try(() =>
         {
-            shown = Sessions.Start(Vaults, repo!, env, target, watch);
+            shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug");
+            tab = "output";
             sessions = Sessions.All();
         });
     }
@@ -597,6 +764,7 @@
     private void NewVariable()
     {
         (editing, formIsEdit, formName, formValue, formSecret) = (true, false, "", "", false);
+        tab = "vars";
     }
 
     private void EditVariable(Variable v)
