@@ -164,7 +164,7 @@
                                     <span class="live-pill"><span class="pulse"></span> @live.Env · @Elapsed(live)</span>
                                     @if (live.Url is not null)
                                     {
-                                        <a class="btn" href="@live.Url" target="_blank" rel="noopener">Open app <Icon Name="external" Size="14" /></a>
+                                        <a class="btn" href="@live.Url" target="_blank" rel="noopener noreferrer" onclick="window.open(this.href, '_blank', 'noopener'); return false;">Open app <Icon Name="external" Size="14" /></a>
                                     }
                                     <button class="btn stop" @onclick="() => StopSession(live)"><Icon Name="stop" Size="12" /> Stop</button>
                                 }
@@ -202,13 +202,20 @@
                         </button>
                         <button class="ptab @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">
                             <Icon Name="flow" /> Flow
-                            @if (FlowList.Count(f => f.Outcome == "failed") is > 0 and var failedFlows)
+                            @if (AllFlows.Count(f => f.Outcome == "failed") is > 0 and var failedFlows)
                             {
                                 <span class="tab-count bad">@failedFlows</span>
                             }
-                            else if (FlowList.Count > 0)
+                            else if (RepoSessions.Any(x => x.Running && x.Flows is not null))
                             {
-                                <span class="tab-count">@FlowList.Count</span>
+                                <span class="pulse"></span>
+                            }
+                        </button>
+                        <button class="ptab @(tab == "features" ? "active" : "")" @onclick="@(() => tab = "features")">
+                            <Icon Name="layers" /> Features
+                            @if (scan is not null)
+                            {
+                                <span class="tab-count">@scan.Features.Count</span>
                             }
                         </button>
                         <button class="ptab @(tab == "files" ? "active" : "")" @onclick="@(() => tab = "files")">
@@ -268,14 +275,12 @@
                         }
                         else if (tab == "flow")
                         {
-                            var flows = FlowList;
-                            var picked = flows.FirstOrDefault(f => f.TraceId == flowId) ?? flows.FirstOrDefault(f => !onlyProblems || f.Outcome != "ok");
                             @if (flowSession is null)
                             {
                                 <div class="state">
                                     <span class="glyph"><Icon Name="flow" Size="22" /></span>
-                                    <h3>See what a feature does, step by step</h3>
-                                    <p>Run a .NET target, then use the app. Each request shows up here as a chain of steps — the request, calls to other services, database commands — with the data passed in and out, and any exception at the line that threw it.</p>
+                                    <h3>Watch a feature travel through the system</h3>
+                                    <p>Run a .NET target, then use the app. This view draws the app and everything it talks to, shows each message moving between them, and lets you replay a request one step at a time.</p>
                                 </div>
                             }
                             else if (flowSession.Flows is null)
@@ -288,139 +293,382 @@
                             }
                             else
                             {
-                                <div class="scoreboard">
-                                    <div class="score"><b>@flows.Count</b><span>flows</span></div>
-                                    <div class="score ok"><b>@flows.Count(f => f.Outcome == "ok")</b><span>clean</span></div>
-                                    <div class="score warn"><b>@flows.Count(f => f.Outcome == "warn")</b><span>with exceptions</span></div>
-                                    <div class="score bad"><b>@flows.Count(f => f.Outcome == "failed")</b><span>failed</span></div>
-                                    <div class="score"><b>@(flows.Count == 0 ? "–" : $"{flows.Max(f => f.Ms):0} ms")</b><span>slowest</span></div>
-                                    <span class="spacer"></span>
-                                    <div class="search narrow">
-                                        <Icon Name="search" />
-                                        <input class="input" placeholder="Filter, e.g. /api/claims" @bind="flowFilter" @bind:event="oninput" />
-                                    </div>
-                                    <label class="check"><input type="checkbox" @bind="onlyProblems" /> Problems only</label>
-                                    <button class="btn small" @onclick="() => { flowSession.Flows.Clear(); flowId = null; }">Clear</button>
-                                </div>
+                                var flows = FlowsInView();
+                                var map = BuildMap(flows);
+                                var picked = flows.FirstOrDefault(f => f.TraceId == flowId);
+                                var events = picked is null ? [] : EventsOf(picked, map);
+                                var at = Math.Clamp(eventIndex, 0, Math.Max(0, events.Count - 1));
+                                var current = events.Count > 0 ? events[at] : null;
+                                var focus = map.Nodes.FirstOrDefault(n => n.Key == selectedNode);
 
-                                @if (flows.Count == 0)
-                                {
-                                    <div class="state">
-                                        <span class="glyph"><Icon Name="flow" Size="22" /></span>
-                                        <h3>@(flowSession.Running ? "Recording — nothing yet" : "Nothing was recorded")</h3>
-                                        <p>Use the app in your browser. Requests appear here as they finish; exceptions appear the moment they are thrown.</p>
-                                    </div>
-                                }
-                                else
-                                {
-                                    <div class="flow-split">
-                                        <div class="flow-list">
-                                            @foreach (var f in flows.Where(f => !onlyProblems || f.Outcome != "ok").Take(150))
-                                            {
-                                                <button class="flow-item @f.Outcome @(picked?.TraceId == f.TraceId ? "active" : "")" @onclick="() => { flowId = f.TraceId; openStep = null; }">
-                                                    <span class="flow-mark"></span>
-                                                    <span class="flow-text">
-                                                        <span class="flow-title">@f.Title</span>
-                                                        <span class="flow-meta">
-                                                            @f.FirstSeen.ToLocalTime().ToString("HH:mm:ss")
-                                                            @if (f.StatusCode is { } httpCode)
-                                                            {
-                                                                <span> · @httpCode</span>
-                                                            }
-                                                            <span> · @f.Ms.ToString("0") ms · @f.Steps.Count steps</span>
-                                                            @if (f.Errors.Count > 0)
-                                                            {
-                                                                <span> · @f.Errors.Count exc</span>
-                                                            }
-                                                        </span>
-                                                    </span>
-                                                </button>
-                                            }
-                                        </div>
-
-                                        <div class="flow-detail">
-                                            @if (picked is null)
-                                            {
-                                                <div class="state"><p>No problems recorded. Untick "Problems only" to see every flow.</p></div>
-                                            }
-                                            else
-                                            {
-                                                <div class="flow-head">
-                                                    <span class="badge @(picked.Outcome == "failed" ? "bad" : picked.Outcome == "warn" ? "warn" : "ok")">@(picked.Outcome == "failed" ? "Failed" : picked.Outcome == "warn" ? "Completed with exceptions" : "Clean")</span>
-                                                    <h3>@picked.Title</h3>
-                                                    <span class="flow-meta">@picked.Ms.ToString("0") ms · trace @picked.TraceId[..Math.Min(8, picked.TraceId.Length)]</span>
-                                                </div>
-
-                                                @foreach (var error in picked.Errors.Where(x => x.SpanId is null || !picked.Steps.ContainsKey(x.SpanId)))
+                                <div class="stage">
+                                    <div class="canvas">
+                                        <div class="canvas-bar">
+                                            <span class="canvas-title">
+                                                @if (flowSession.Running)
                                                 {
-                                                    @ErrorCard(error)
+                                                    <span class="pulse"></span>
                                                 }
-
-                                                <div class="track">
-                                                    @foreach (var step in picked.Ordered())
+                                                @(picked is not null ? "Replaying one flow" : flowSession.Running ? "Live" : "Recording ended")
+                                            </span>
+                                            @if (featureFilter is not null)
+                                            {
+                                                <span class="badge accent">
+                                                    @featureFilter.Verb @(featureFilter.Route ?? featureFilter.Name)
+                                                    <button class="chip-x" title="Show every feature" @onclick="() => featureFilter = null"><Icon Name="x" Size="11" /></button>
+                                                </span>
+                                            }
+                                            <span class="spacer"></span>
+                                            <span class="legend"><i class="lg ok"></i>healthy <i class="lg bad"></i>failing <i class="lg idle"></i>configured, unused</span>
+                                        </div>
+                                        <svg class="map" viewBox="0 0 760 @map.Height" role="img" aria-label="How messages travel between @repo.Name and what it depends on">
+                                            @foreach (var edge in map.Edges)
+                                            {
+                                                <path class="edge @edge.State @(current?.EdgeKey == edge.Key ? "current" : "")" d="@edge.Path" />
+                                            }
+                                            @foreach (var node in map.Nodes)
+                                            {
+                                                <g class="node @node.Kind @node.State @(selectedNode == node.Key ? "selected" : "") @(current?.NodeKey == node.Key ? "current" : "")"
+                                                   transform="translate(@N(node.X),@N(node.Y))" @onclick="() => PickNode(node.Key)">
+                                                    <title>@node.Tip</title>
+                                                    <rect class="node-box" width="@N(node.W)" height="@N(node.H)" rx="14" />
+                                                    <rect class="node-icon" x="10" y="@N(node.H / 2 - 17)" width="34" height="34" rx="9" />
+                                                    <g transform="translate(18,@N(node.H / 2 - 9))"><Icon Name="@node.Icon" Size="18" /></g>
+                                                    @SvgText("node-name", 54, node.H / 2 - 2, node.Name)
+                                                    @SvgText("node-sub", 54, node.H / 2 + 14, node.Sub)
+                                                    @if (node.Stat is not null)
                                                     {
-                                                        var notes = picked.Notes.Where(n => n.SpanId == step.Id).ToList();
-                                                        var errors = picked.Errors.Where(x => x.SpanId == step.Id).ToList();
-                                                        var isOpen = openStep == step.Id;
-                                                        var share = picked.Ms > 0 ? Math.Clamp(step.Ms / picked.Ms * 100, 1, 100) : 1;
-                                                        <div class="phase @step.Category @(step.Failed ? "failed" : errors.Count > 0 ? "warn" : "") @(isOpen ? "open" : "")" style="--depth:@step.Depth">
-                                                            <button class="phase-head" @onclick="() => openStep = isOpen ? null : step.Id">
-                                                                <span class="phase-node"><Icon Name="@StepIcon(step)" Size="14" /></span>
-                                                                <span class="phase-text">
-                                                                    <span class="phase-kind">@StepKind(step)</span>
-                                                                    <span class="phase-title">@step.Title</span>
-                                                                </span>
-                                                                @if (step.StatusCode is { } httpCode)
-                                                                {
-                                                                    <span class="badge @(httpCode >= 400 ? "bad" : "ok")">@httpCode</span>
-                                                                }
-                                                                @if (notes.Count > 0)
-                                                                {
-                                                                    <span class="badge accent">@notes.Count data</span>
-                                                                }
-                                                                @if (errors.Count > 0)
-                                                                {
-                                                                    <span class="badge @(errors.Any(x => x.Unhandled) ? "bad" : "warn")">@errors.Count exception@(errors.Count == 1 ? "" : "s")</span>
-                                                                }
-                                                                <span class="phase-ms">@step.Ms.ToString("0") ms</span>
-                                                            </button>
-                                                            <div class="phase-bar"><i style="width:@(share.ToString("0", System.Globalization.CultureInfo.InvariantCulture))%"></i></div>
+                                                        @SvgText("node-stat", node.W - 12, 18, node.Stat, "end")
+                                                    }
+                                                </g>
+                                            }
+                                            @if (current?.Path is not null)
+                                            {
+                                                <circle @key="packetKey" class="packet @current.Motion @(current.Failed ? "bad" : "")" r="7" style="offset-path: path('@current.Path')" />
+                                            }
+                                        </svg>
+                                        @if (picked is not null && events.Count > 0)
+                                        {
+                                            <div class="transport">
+                                                <button class="icon-btn" title="Previous step" disabled="@(at == 0)" @onclick="() => Step(-1, events.Count)"><Icon Name="prev" /></button>
+                                                <button class="btn primary small" @onclick="() => TogglePlay(events.Count)">
+                                                    <Icon Name="@(playing ? "pause" : "play")" Size="12" /> @(playing ? "Pause" : at >= events.Count - 1 ? "Replay" : "Play")
+                                                </button>
+                                                <button class="icon-btn" title="Next step" disabled="@(at >= events.Count - 1)" @onclick="() => Step(1, events.Count)"><Icon Name="next" /></button>
+                                                <span class="transport-pos">Step @(at + 1) of @events.Count</span>
+                                                <span class="transport-now">@current?.Direction</span>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="transport hint">Click a device to see what it needs. Pick a flow on the right to replay it step by step.</div>
+                                        }
+                                    </div>
 
-                                                            @foreach (var error in errors)
-                                                            {
-                                                                @ErrorCard(error)
-                                                            }
+                                    <div class="inspector">
+                                        @if (picked is not null)
+                                        {
+                                            var (verb, label, host) = Describe(picked);
+                                            <div class="insp-head">
+                                                <button class="icon-btn" title="Back to all flows" @onclick="CloseFlow"><Icon Name="back" /></button>
+                                                @if (verb is not null)
+                                                {
+                                                    <span class="verb v-@verb.ToLowerInvariant()">@verb</span>
+                                                }
+                                                <h3 title="@label">@label</h3>
+                                            </div>
+                                            <div class="facts">
+                                                <span class="badge @(picked.Outcome == "failed" ? "bad" : picked.Outcome == "warn" ? "warn" : "ok")">@(picked.Outcome == "failed" ? "Failed" : picked.Outcome == "warn" ? "Exceptions" : "Clean")</span>
+                                                @if (picked.StatusCode is { } httpCode)
+                                                {
+                                                    <span class="fact">Status <b>@httpCode</b></span>
+                                                }
+                                                <span class="fact">Took <b>@picked.Ms.ToString("0") ms</b></span>
+                                                <span class="fact">At <b>@picked.FirstSeen.ToLocalTime().ToString("HH:mm:ss")</b></span>
+                                                @if (host is not null)
+                                                {
+                                                    <span class="fact">To <b>@host</b></span>
+                                                }
+                                            </div>
 
-                                                            @if (isOpen)
+                                            <ol class="events">
+                                                @for (var i = 0; i < events.Count; i++)
+                                                {
+                                                    var index = i;
+                                                    var ev = events[i];
+                                                    <li class="event @(index == at ? "current" : "") @(ev.Failed ? "failed" : ev.Error is not null ? "warn" : "")">
+                                                        <button class="event-head" @onclick="() => GoTo(index)">
+                                                            <span class="event-n">@(index + 1)</span>
+                                                            <span class="event-text">
+                                                                <span class="event-dir">@ev.Direction</span>
+                                                                <span class="event-title">@ev.Title</span>
+                                                            </span>
+                                                            @if (ev.Notes.Count > 0)
                                                             {
-                                                                <div class="phase-body">
-                                                                    @foreach (var note in notes)
-                                                                    {
-                                                                        <div class="capture">
-                                                                            <div class="capture-head"><Icon Name="box" Size="13" /> @note.Label @if (note.Title is not null){<span class="flow-meta">@note.Title</span>}</div>
-                                                                            <pre>@Pretty(note.Body)</pre>
-                                                                        </div>
-                                                                    }
-                                                                    @if (step.StatusText is not null)
-                                                                    {
-                                                                        <div class="capture"><div class="capture-head">Status</div><pre>@step.StatusText</pre></div>
-                                                                    }
-                                                                    <table class="tags">
-                                                                        <tr><td>source</td><td>@step.Source</td></tr>
-                                                                        <tr><td>started</td><td>@step.Start.ToLocalTime().ToString("HH:mm:ss.fff")</td></tr>
-                                                                        @foreach (var tag in step.Tags.OrderBy(t => t.Key))
-                                                                        {
-                                                                            <tr><td>@tag.Key</td><td>@tag.Value</td></tr>
-                                                                        }
-                                                                    </table>
-                                                                </div>
+                                                                <span class="badge accent">data</span>
                                                             }
-                                                        </div>
+                                                            @if (ev.Code is { } evCode)
+                                                            {
+                                                                <span class="badge @(evCode >= 400 ? "bad" : "ok")">@evCode</span>
+                                                            }
+                                                            @if (ev.Ms is { } evMs)
+                                                            {
+                                                                <span class="event-ms">@evMs.ToString("0") ms</span>
+                                                            }
+                                                        </button>
+                                                        @if (index == at)
+                                                        {
+                                                            <div class="event-body">
+                                                                @if (ev.Error is not null)
+                                                                {
+                                                                    @ErrorCard(ev.Error)
+                                                                }
+                                                                @foreach (var note in ev.Notes)
+                                                                {
+                                                                    <div class="capture">
+                                                                        <div class="capture-head"><Icon Name="box" Size="13" /> @note.Label</div>
+                                                                        <pre>@Pretty(note.Body)</pre>
+                                                                    </div>
+                                                                }
+                                                                @if (ev.Step is not null)
+                                                                {
+                                                                    <details class="more">
+                                                                        <summary>Details</summary>
+                                                                        <table class="tags">
+                                                                            <tr><td>source</td><td>@ev.Step.Source</td></tr>
+                                                                            <tr><td>started</td><td>@ev.Step.Start.ToLocalTime().ToString("HH:mm:ss.fff")</td></tr>
+                                                                            @if (ev.Step.StatusText is not null)
+                                                                            {
+                                                                                <tr><td>status</td><td>@ev.Step.StatusText</td></tr>
+                                                                            }
+                                                                            @foreach (var tag in ev.Step.Tags.OrderBy(t => t.Key))
+                                                                            {
+                                                                                <tr><td>@tag.Key</td><td>@tag.Value</td></tr>
+                                                                            }
+                                                                        </table>
+                                                                    </details>
+                                                                }
+                                                                @if (ev.Error is null && ev.Notes.Count == 0 && ev.Step is null)
+                                                                {
+                                                                    <div class="flow-meta">Nothing more was captured for this step.</div>
+                                                                }
+                                                            </div>
+                                                        }
+                                                    </li>
+                                                }
+                                            </ol>
+                                        }
+                                        else if (focus is not null)
+                                        {
+                                            var calls = CallsTo(flows, focus.Key);
+                                            <div class="insp-head">
+                                                <button class="icon-btn" title="Back to all flows" @onclick="() => selectedNode = null"><Icon Name="back" /></button>
+                                                <span class="device-icon @focus.Kind"><Icon Name="@focus.Icon" Size="16" /></span>
+                                                <h3 title="@focus.Tip">@focus.FullName</h3>
+                                            </div>
+                                            <div class="facts">
+                                                <span class="fact">@(focus.Kind == "app" ? "Requests" : "Calls") <b>@calls.Count</b></span>
+                                                <span class="fact">Failed <b class="@(calls.Any(c => c.Failed) ? "bad-text" : "")">@calls.Count(c => c.Failed)</b></span>
+                                                @if (calls.Count > 0)
+                                                {
+                                                    <span class="fact">Average <b>@calls.Average(c => c.Ms).ToString("0") ms</b></span>
+                                                }
+                                            </div>
+                                            @if (focus.Address is not null)
+                                            {
+                                                <div class="needs">
+                                                    <div class="needs-title">Address</div>
+                                                    <div class="mono">@focus.Address</div>
+                                                </div>
+                                            }
+                                            @if (focus.Variables.Count > 0)
+                                            {
+                                                <div class="needs">
+                                                    <div class="needs-title">Set by @(focus.Variables.Count == 1 ? "this variable" : "these variables") in @envName</div>
+                                                    @foreach (var name in focus.Variables)
+                                                    {
+                                                        <span class="badge accent mono">@name</span>
                                                     }
                                                 </div>
                                             }
-                                        </div>
+                                            else if (focus.Kind == "service")
+                                            {
+                                                <div class="needs">
+                                                    <div class="needs-title">Not in the vault</div>
+                                                    <div class="flow-meta">No variable in @envName points at this address. It is set somewhere else: appsettings, code, or a variable RepoRunner does not hold.</div>
+                                                </div>
+                                            }
+                                            <div class="needs-title pad-top">@(calls.Count == 0 ? "No traffic recorded yet" : "Most recent")</div>
+                                            <div class="flow-list">
+                                                @foreach (var call in calls.Take(40))
+                                                {
+                                                    <button class="flow-item @(call.Failed ? "failed" : "ok")" @onclick="() => OpenFlow(call.Flow.TraceId, call.Step.Id)">
+                                                        <span class="flow-mark"></span>
+                                                        <span class="flow-text">
+                                                            <span class="flow-line">
+                                                                @if (call.Verb is not null)
+                                                                {
+                                                                    <span class="verb v-@call.Verb.ToLowerInvariant()">@call.Verb</span>
+                                                                }
+                                                                <span class="flow-title">@call.Label</span>
+                                                            </span>
+                                                            <span class="flow-meta">@call.Step.Start.ToLocalTime().ToString("HH:mm:ss") @(call.Step.StatusCode is { } c ? $"· {c} " : "")· @call.Ms.ToString("0") ms</span>
+                                                        </span>
+                                                    </button>
+                                                }
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            var rows = FlowRows(flows);
+                                            <div class="scores">
+                                                <div class="score"><b>@flows.Count</b><span>flows</span></div>
+                                                <div class="score ok"><b>@flows.Count(f => f.Outcome == "ok")</b><span>clean</span></div>
+                                                <div class="score warn"><b>@flows.Count(f => f.Outcome == "warn")</b><span>exceptions</span></div>
+                                                <div class="score bad"><b>@flows.Count(f => f.Outcome == "failed")</b><span>failed</span></div>
+                                            </div>
+                                            var noticed = Insights(flows, map);
+                                            @if (noticed.Count > 0)
+                                            {
+                                                <div class="noticed">
+                                                    <div class="needs-title">Worth a look</div>
+                                                    @foreach (var notice in noticed)
+                                                    {
+                                                        <button class="notice @notice.Kind" @onclick="notice.Go">
+                                                            <Icon Name="@(notice.Kind == "bad" ? "alert" : "eye")" Size="14" />
+                                                            <span>@notice.Text</span>
+                                                        </button>
+                                                    }
+                                                </div>
+                                            }
+                                            <div class="insp-tools">
+                                                <div class="seg">
+                                                    @foreach (var (key, name) in FlowViews)
+                                                    {
+                                                        <button class="seg-opt @(flowView == key ? "active" : "")" @onclick="() => flowView = key">@name</button>
+                                                    }
+                                                </div>
+                                                <button class="icon-btn" title="Clear recorded flows" @onclick="ClearFlows"><Icon Name="trash" /></button>
+                                            </div>
+                                            <div class="search wide">
+                                                <Icon Name="search" />
+                                                <input class="input" placeholder="Filter by path, address or exception" @bind="flowFilter" @bind:event="oninput" />
+                                            </div>
+                                            @if (rows.Count == 0)
+                                            {
+                                                <div class="state small">
+                                                    <p>@(flows.Count == 0 ? (flowSession.Running ? "Recording. Use the app and its requests appear here." : "Nothing was recorded.") : "Nothing matches this view.")</p>
+                                                </div>
+                                            }
+                                            <div class="flow-list">
+                                                @foreach (var row in rows.Take(200))
+                                                {
+                                                    <button class="flow-item @row.Flow.Outcome" @onclick="() => OpenFlow(row.Flow.TraceId, null)">
+                                                        <span class="flow-mark"></span>
+                                                        <span class="flow-text">
+                                                            <span class="flow-line">
+                                                                @if (row.Verb is not null)
+                                                                {
+                                                                    <span class="verb v-@row.Verb.ToLowerInvariant()">@row.Verb</span>
+                                                                }
+                                                                <span class="flow-title">@row.Label</span>
+                                                                @if (row.Count > 1)
+                                                                {
+                                                                    <span class="times">×@row.Count</span>
+                                                                }
+                                                            </span>
+                                                            <span class="flow-meta">
+                                                                @row.Flow.FirstSeen.ToLocalTime().ToString("HH:mm:ss")
+                                                                @if (row.Host is not null)
+                                                                {
+                                                                    <span> · @row.Host</span>
+                                                                }
+                                                                @if (row.Flow.StatusCode is { } rowCode)
+                                                                {
+                                                                    <span> · @rowCode</span>
+                                                                }
+                                                                @if (row.Flow.Steps.Count > 0)
+                                                                {
+                                                                    <span> · @row.Flow.Ms.ToString("0") ms</span>
+                                                                }
+                                                                @if (row.Flow.Errors.Count > 0)
+                                                                {
+                                                                    <span> · @row.Flow.Errors.Count exception@(row.Flow.Errors.Count == 1 ? "" : "s")</span>
+                                                                }
+                                                            </span>
+                                                        </span>
+                                                    </button>
+                                                }
+                                            </div>
+                                        }
                                     </div>
+                                </div>
+                            }
+                        }
+                        else if (tab == "features")
+                        {
+                            @if (scan is null)
+                            {
+                                <div class="state">
+                                    <span class="glyph"><Icon Name="search" Size="22" /></span>
+                                    <h3>Reading the source…</h3>
+                                    <p>Listing this repo's pages, endpoints and background workers.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                var shownFeatures = scan.Features.Where(f => string.IsNullOrWhiteSpace(featureSearch)
+                                    || (f.Route ?? "").Contains(featureSearch.Trim(), StringComparison.OrdinalIgnoreCase)
+                                    || f.Name.Contains(featureSearch.Trim(), StringComparison.OrdinalIgnoreCase)
+                                    || f.File.Contains(featureSearch.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
+                                var usage = FeatureUsage();
+                                <div class="toolbar">
+                                    <div class="search">
+                                        <Icon Name="search" />
+                                        <input class="input" placeholder="Filter features" @bind="featureSearch" @bind:event="oninput" />
+                                    </div>
+                                    <span class="flow-meta">@scan.Features.Count features in @scan.FilesRead source files</span>
+                                    <span class="spacer"></span>
+                                    <button class="btn small" @onclick="Rescan"><Icon Name="refresh" Size="14" /> Scan again</button>
+                                </div>
+                                @if (scan.Features.Count == 0)
+                                {
+                                    <div class="state">
+                                        <span class="glyph"><Icon Name="search" Size="22" /></span>
+                                        <h3>No features recognised</h3>
+                                        <p>The scan looks for Blazor pages, attribute-routed controllers, minimal API routes and hosted services.</p>
+                                    </div>
+                                }
+                                @foreach (var group in shownFeatures.GroupBy(f => f.Kind))
+                                {
+                                    <div class="feature-group">@(group.Key == "page" ? "Pages" : group.Key == "endpoint" ? "API endpoints" : "Background workers") <span class="tab-count">@group.Count()</span></div>
+                                    @foreach (var feature in group.Take(250))
+                                    {
+                                        var used = usage.GetValueOrDefault(feature);
+                                        <div class="feature-row">
+                                            @if (feature.Kind == "worker")
+                                            {
+                                                <span class="verb v-worker">JOB</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="verb v-@(feature.Verb ?? "get").ToLowerInvariant()">@(feature.Kind == "page" ? "PAGE" : feature.Verb)</span>
+                                            }
+                                            <div class="feature-text">
+                                                <span class="feature-route">@(feature.Route ?? feature.Name)</span>
+                                                <span class="flow-meta">@(feature.Route is null ? "" : feature.Name + " · ")@feature.File:@feature.Line</span>
+                                            </div>
+                                            @if (used.Calls > 0)
+                                            {
+                                                <span class="badge @(used.Failed > 0 ? "bad" : "ok")">@used.Calls call@(used.Calls == 1 ? "" : "s")@(used.Failed > 0 ? $" · {used.Failed} failed" : "")</span>
+                                            }
+                                            @if (feature.Route is not null)
+                                            {
+                                                <button class="btn small" title="Show only this feature on the map" @onclick="() => ShowFeature(feature)"><Icon Name="flow" Size="14" /> Map</button>
+                                            }
+                                            <button class="icon-btn" title="Open in Rider" @onclick="() => OpenFeature(feature)"><Icon Name="external" /></button>
+                                        </div>
+                                    }
                                 }
                             }
                         }
@@ -494,6 +742,21 @@
                                 <button class="btn small" @onclick="() => showPaste = !showPaste"><Icon Name="clipboard" Size="14" /> Paste .env</button>
                                 <button class="btn primary small" @onclick="NewVariable"><Icon Name="plus" Size="14" /> Add variable</button>
                             </div>
+
+                            @if (MissingReads.Count > 0)
+                            {
+                                <div class="callout">
+                                    <Icon Name="alert" />
+                                    <div>
+                                        The code reads @MissingReads.Count variable@(MissingReads.Count == 1 ? "" : "s") that @envName does not define:
+                                        @foreach (var read in MissingReads.Take(12))
+                                        {
+                                            <button class="badge warn mono missing" title="@read.File:@read.Line — click to add it" @onclick="() => AddMissing(read.Name)">@read.Name</button>
+                                        }
+                                        @(MissingReads.Count > 12 ? $"and {MissingReads.Count - 12} more." : "")
+                                    </div>
+                                </div>
+                            }
 
                             @if (showPaste)
                             {
@@ -713,7 +976,11 @@
         if (tab == "output" && shown is { Running: true }) await JS.InvokeVoidAsync("rrScrollEnd", logElement);
     }
 
-    public void Dispose() => timer?.Dispose();
+    public void Dispose()
+    {
+        timer?.Dispose();
+        playTimer?.Dispose();
+    }
 
     // ---------- loading ----------
 
@@ -736,6 +1003,7 @@
         solutions = [];
         if (repo is null) return;
 
+        EnsureScan();
         if (!envs.Any(e => e.Name == envName)) envName = envs[0].Name;
         var current = repo;
         var env = CurrentEnv;
@@ -816,38 +1084,453 @@
 
     private bool IsConfirming(TargetDef target, string mode) => confirmKey == $"run:{target.Name}:{mode}";
 
-    // ---------- flow ----------
+    // ---------- flow: the map, its replay and what it notices ----------
+
+    private sealed record FlowRow(Flow Flow, int Count, string? Verb, string Label, string? Host);
+
+    private sealed record MapNode(string Key, string Kind, string Name, string FullName, string Sub, string Icon, double X, double Y, double W, double H,
+        string State, string? Stat, string? Address, List<string> Variables, int Calls, int Failed)
+    {
+        public string Tip => Address is null ? FullName : $"{FullName} - {Address}";
+    }
+
+    private sealed record MapEdge(string Key, string Path, string State);
+
+    private sealed record FlowMap(List<MapNode> Nodes, List<MapEdge> Edges, int Height);
+
+    /// <summary>One hop of a flow: a message between two devices, or something that happened inside the app.</summary>
+    private sealed record FlowEvent(string Direction, string Title, string? NodeKey, string? EdgeKey, string? Path, string Motion, bool Failed,
+        int? Code, double? Ms, FlowStep? Step, FlowError? Error, List<FlowNote> Notes, DateTime At);
+
+    private sealed record Call(Flow Flow, FlowStep Step, string? Verb, string Label, double Ms, bool Failed);
+
+    private sealed record Notice(string Kind, string Text, Action Go);
+
+    private sealed class Dependency
+    {
+        public required string Name { get; init; }
+        public required string Kind { get; init; }
+        public required string Address { get; init; }
+        public List<string> Variables { get; } = [];
+        public int Calls, Failed;
+        public DateTime Last;
+    }
+
+    private static readonly (string Key, string Name)[] FlowViews =
+        [("all", "All"), ("requests", "Requests"), ("background", "Background"), ("problems", "Problems")];
+
+    private static readonly System.Globalization.CultureInfo Plain = System.Globalization.CultureInfo.InvariantCulture;
+
+    private string flowView = "all";
+    private int eventIndex;
+    private int packetKey;
+    private bool playing;
+    private int playCount;
+    private string? selectedNode;
+    private Timer? playTimer;
+
+    private FeatureScan? scan;
+    private long scanRepoId = -1;
+    private Feature? featureFilter;
+    private string featureSearch = "";
+    private readonly Dictionary<string, Feature?> featureOfFlow = [];
+
+    private static string N(double value) => value.ToString("0.#", Plain);
+
+    private static MarkupString SvgText(string css, double x, double y, string content, string anchor = "start") =>
+        new($"<text class=\"{css}\" x=\"{N(x)}\" y=\"{N(y)}\" text-anchor=\"{anchor}\">{System.Net.WebUtility.HtmlEncode(content)}</text>");
 
     /// <summary>The session whose flows are shown: the selected one if it records, else the newest that does.</summary>
     private RunSession? flowSession => shown is { Flows: not null } ? shown : RepoSessions.LastOrDefault(s => s.Flows is not null) ?? shown;
 
-    private List<Flow> FlowList
+    private List<Flow> AllFlows => flowSession?.Flows?.Snapshot() ?? [];
+
+    private List<Flow> FlowList => AllFlows;
+
+    private static bool IsRequest(Flow flow) => flow.Root?.Category == "request";
+
+    private const string BlazorHub = "Microsoft.AspNetCore.Components.Server.ComponentHub/";
+
+    /// <summary>A Blazor circuit message that did nothing but bookkeeping: no calls, no data, no exception.</summary>
+    private static bool IsChatter(Flow flow) =>
+        flow.Errors.Count == 0 && flow.Notes.Count == 0 && flow.Steps.Count == 1 && flow.Root is { } root && root.Name.StartsWith(BlazorHub);
+
+    private List<Flow> FlowsInView()
     {
-        get
+        IEnumerable<Flow> flows = AllFlows.Where(f => !IsChatter(f));
+        if (featureFilter is { } feature) flows = flows.Where(f => FeatureOf(f) == feature);
+        if (!string.IsNullOrWhiteSpace(flowFilter))
         {
-            var all = flowSession?.Flows?.Snapshot() ?? [];
-            return string.IsNullOrWhiteSpace(flowFilter)
-                ? all
-                : all.Where(f => f.Title.Contains(flowFilter.Trim(), StringComparison.OrdinalIgnoreCase)
-                              || f.Steps.Values.Any(s => s.Title.Contains(flowFilter.Trim(), StringComparison.OrdinalIgnoreCase))).ToList();
+            var text = flowFilter.Trim();
+            flows = flows.Where(f => f.Title.Contains(text, StringComparison.OrdinalIgnoreCase)
+                                  || f.Steps.Values.Any(s => s.Title.Contains(text, StringComparison.OrdinalIgnoreCase))
+                                  || f.Errors.Any(e => e.Type.Contains(text, StringComparison.OrdinalIgnoreCase)));
         }
+        return flows.ToList();
     }
 
-    private static string StepIcon(FlowStep step) => step.Category switch
+    private static (string? Verb, string Label, string? Host) Describe(FlowStep step)
     {
-        "request" => "download",
-        "http" => "external",
-        "db" => "database",
-        _ => "dot",
+        var verb = step.Tag("http.request.method", "http.method");
+        if (step.Category == "request") return (verb, step.Tag("url.path", "http.target", "http.route") ?? step.Name, null);
+        if (step.Category == "http" && Uri.TryCreate(step.Tag("url.full", "http.url"), UriKind.Absolute, out var uri))
+            return (verb, uri.AbsolutePath, uri.Authority);
+        var name = step.Title.Length > 0 ? step.Title : step.Name;
+        return (null, name.StartsWith(BlazorHub) ? "Blazor UI event · " + name[BlazorHub.Length..] : name, null);
+    }
+
+    private static (string? Verb, string Label, string? Host) Describe(Flow flow) =>
+        flow.Root is { } root ? Describe(root)
+        : (null, flow.Errors.Count > 0 ? flow.Errors[0].Type.Split('.').Last() : flow.Title, null);
+
+    /// <summary>Which device a step talks to: a host for an outgoing call, a server or database name for a query.</summary>
+    private static string? DeviceOf(FlowStep step) => step.Category switch
+    {
+        "http" => Uri.TryCreate(step.Tag("url.full", "http.url"), UriKind.Absolute, out var uri) ? uri.Authority.ToLowerInvariant() : null,
+        "db" => "db:" + (step.Tag("server.address", "net.peer.name", "db.name", "db.namespace", "db.system", "db.system.name") ?? "database").ToLowerInvariant(),
+        _ => null,
     };
 
-    private static string StepKind(FlowStep step) => step.Category switch
+    /// <summary>Rows for the list. Identical trouble-free background calls (a log shipper, a health ping) collapse into one.</summary>
+    private List<FlowRow> FlowRows(List<Flow> flows)
     {
-        "request" => "Incoming request",
-        "http" => "Call to another service",
-        "db" => "Database",
-        _ => step.Source.Length > 0 ? step.Source : "Step",
-    };
+        var rows = new List<FlowRow>();
+        var groups = new Dictionary<string, int>();
+        foreach (var flow in flows)
+        {
+            var visible = flowView switch
+            {
+                "requests" => IsRequest(flow),
+                "background" => !IsRequest(flow),
+                "problems" => flow.Outcome != "ok",
+                _ => true,
+            };
+            if (!visible) continue;
+            var (verb, label, host) = Describe(flow);
+            if (!IsRequest(flow) && flow.Outcome == "ok")
+            {
+                var key = $"{verb} {host}{label}";
+                if (groups.TryGetValue(key, out var at)) { rows[at] = rows[at] with { Count = rows[at].Count + 1 }; continue; }
+                groups[key] = rows.Count;
+            }
+            rows.Add(new FlowRow(flow, 1, verb, label, host));
+        }
+        return rows;
+    }
+
+    private static string Short(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
+
+    /// <summary>OpsApiBaseUrl → OpsApi, OPEN_SEARCH_URI → OPEN_SEARCH: the device a variable points at.</summary>
+    private static string Friendly(string variable)
+    {
+        foreach (var suffix in new[] { "BaseUrl", "_URL", "_URI", "Url", "Uri" })
+            if (variable.Length > suffix.Length && variable.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                return variable[..^suffix.Length].TrimEnd('_');
+        return variable;
+    }
+
+    /// <summary>
+    /// The devices and links: whoever calls the app, the app, and everything it depends on. Dependencies come from
+    /// two places: addresses the vault holds for this environment, and addresses the app was seen calling.
+    /// </summary>
+    private FlowMap BuildMap(List<Flow> flows)
+    {
+        var known = new Dictionary<string, Dependency>();
+        foreach (var variable in vars.Where(v => !v.Secret))
+        {
+            if (!Uri.TryCreate(variable.Value.Trim().Trim('"'), UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) continue;
+            var key = uri.Authority.ToLowerInvariant();
+            if (!known.TryGetValue(key, out var dependency))
+                known[key] = dependency = new Dependency { Name = Friendly(variable.Name), Kind = "service", Address = uri.Authority };
+            dependency.Variables.Add(variable.Name);
+        }
+        foreach (var step in flows.SelectMany(f => f.Steps.Values))
+        {
+            if (DeviceOf(step) is not { } key) continue;
+            if (!known.TryGetValue(key, out var dependency))
+            {
+                var isDb = step.Category == "db";
+                known[key] = dependency = new Dependency
+                {
+                    Name = isDb ? step.Tag("db.name", "db.namespace", "db.system", "db.system.name") ?? "Database" : key.Split(':')[0],
+                    Kind = isDb ? "db" : "service",
+                    Address = isDb ? key[3..] : key,
+                };
+            }
+            dependency.Calls++;
+            if (step.Failed) dependency.Failed++;
+            if (step.Start > dependency.Last) dependency.Last = step.Start;
+        }
+
+        // Everything that carried traffic is drawn; configured-but-unused devices fill the map up to seven.
+        var used = known.Count(d => d.Value.Calls > 0);
+        var shownDeps = known.OrderByDescending(d => d.Value.Calls).ThenBy(d => d.Value.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(Math.Clamp(used, 7, 10)).ToList();
+        var height = Math.Max(360, shownDeps.Count * 76 + 40);
+        var mid = height / 2.0;
+        var live = flowSession?.Running == true;
+        bool Recent(DateTime when) => live && (DateTime.UtcNow - when).TotalSeconds < 2.5;
+
+        var requests = flows.Where(IsRequest).ToList();
+        var failedRequests = requests.Count(f => f.Outcome == "failed");
+        var exceptions = flows.Sum(f => f.Errors.Count);
+        var appName = repo!.Name;
+
+        var nodes = new List<MapNode>
+        {
+            new("client", "client", "Caller", "Whoever calls the app", "browser, client", "monitor", 16, mid - 30, 140, 60,
+                requests.Count == 0 ? "idle" : failedRequests > 0 ? "failed" : "active",
+                requests.Count == 0 ? null : $"{requests.Count} in", null, [], requests.Count, failedRequests),
+            new("app", "app", Short(appName, 13), appName, Short(flowSession?.Target ?? "", 15), "server", 236, mid - 40, 176, 80,
+                flows.Any(f => f.Outcome == "failed") ? "failed" : "active",
+                exceptions == 0 ? null : $"{exceptions} exc", flowSession?.Url, [], requests.Count, failedRequests),
+        };
+        var edges = new List<MapEdge>
+        {
+            new("client", $"M156 {N(mid)} L236 {N(mid)}",
+                requests.Count == 0 ? "idle" : failedRequests > 0 ? "failed" : requests.Any(f => Recent(f.FirstSeen)) ? "active live" : "active"),
+        };
+
+        var top = (height - (shownDeps.Count * 76 - 18)) / 2.0;
+        for (var i = 0; i < shownDeps.Count; i++)
+        {
+            var (key, dependency) = shownDeps[i];
+            var y = top + i * 76;
+            var state = dependency.Calls == 0 ? "idle" : dependency.Failed > 0 ? "failed" : "active";
+            nodes.Add(new MapNode(key, dependency.Kind, Short(dependency.Name, 13), dependency.Name, Short(dependency.Address, 17),
+                dependency.Kind == "db" ? "database" : "globe", 568, y, 184, 60, state,
+                dependency.Calls == 0 ? null : dependency.Failed > 0 ? $"{dependency.Failed}/{dependency.Calls} failed" : $"{dependency.Calls}",
+                dependency.Address, dependency.Variables, dependency.Calls, dependency.Failed));
+            edges.Add(new MapEdge(key, $"M412 {N(mid)} C492 {N(mid)} 488 {N(y + 30)} 568 {N(y + 30)}",
+                state + (Recent(dependency.Last) ? " live" : "")));
+        }
+        return new FlowMap(nodes, edges, height);
+    }
+
+    /// <summary>A flow as an ordered list of hops, each tied to the link its message travels on.</summary>
+    private List<FlowEvent> EventsOf(Flow flow, FlowMap map)
+    {
+        var app = repo!.Name;
+        string? PathOf(string key) => map.Edges.FirstOrDefault(e => e.Key == key)?.Path;
+        var notes = flow.Notes.ToLookup(n => n.SpanId ?? "");
+        var events = new List<FlowEvent>();
+
+        foreach (var step in flow.Ordered())
+        {
+            var (verb, label, host) = Describe(step);
+            var title = verb is null ? label : $"{verb} {label}";
+            var captured = notes[step.Id].ToList();
+            switch (step.Category)
+            {
+                case "request":
+                    events.Add(new FlowEvent($"Caller → {app}", title, "app", "client", PathOf("client"), "go", false, null, null, step, null, captured, step.Start));
+                    break;
+                case "http" or "db":
+                {
+                    var node = map.Nodes.FirstOrDefault(n => n.Key == DeviceOf(step));
+                    events.Add(new FlowEvent($"{app} → {node?.FullName ?? host ?? "a dependency"}", title, node?.Key ?? "app", node?.Key,
+                        node is null ? null : PathOf(node.Key), "round", step.Failed, step.StatusCode, step.Ms, step, null, captured, step.Start));
+                    break;
+                }
+                default:
+                    events.Add(new FlowEvent($"Inside {app}", title, "app", null, null, "pulse", step.Failed, null, step.Ms, step, null, captured, step.Start));
+                    break;
+            }
+        }
+        foreach (var error in flow.Errors)
+            events.Add(new FlowEvent($"Inside {app}", $"{error.Type.Split('.').Last()} thrown", "app", null, null, "pulse", error.Unhandled,
+                null, null, null, error, [], error.At));
+        foreach (var loose in flow.Notes.Where(n => n.SpanId is null || !flow.Steps.ContainsKey(n.SpanId)))
+            events.Add(new FlowEvent($"Inside {app}", loose.Title ?? loose.Label, "app", null, null, "pulse", false, null, null, null, null, [loose], loose.At));
+
+        events = events.OrderBy(e => e.At).ToList();
+        if (flow.Root is { Category: "request" } root)
+            events.Add(new FlowEvent($"{app} → Caller", $"Response{(root.StatusCode is { } code ? $" {code}" : "")}", "client", "client", PathOf("client"),
+                "back", root.Failed, root.StatusCode, root.Ms, null, null, [], root.Start.AddMilliseconds(root.Ms)));
+        return events;
+    }
+
+    /// <summary>Recent traffic of one device: requests for the app and its caller, calls for a dependency.</summary>
+    private List<Call> CallsTo(List<Flow> flows, string key)
+    {
+        if (key is "app" or "client")
+            return flows.Where(IsRequest).Select(f =>
+            {
+                var (verb, label, _) = Describe(f);
+                return new Call(f, f.Root!, verb, label, f.Ms, f.Outcome == "failed");
+            }).ToList();
+        return flows.SelectMany(f => f.Steps.Values.Where(s => DeviceOf(s) == key).Select(s =>
+        {
+            var (verb, label, _) = Describe(s);
+            return new Call(f, s, verb, label, s.Ms, s.Failed);
+        })).OrderByDescending(c => c.Step.Start).ToList();
+    }
+
+    /// <summary>Things worth knowing that reading the code would not show.</summary>
+    private List<Notice> Insights(List<Flow> flows, FlowMap map)
+    {
+        var notices = new List<Notice>();
+        foreach (var node in map.Nodes.Where(n => n.Kind is "service" or "db" && n.Failed > 0))
+            notices.Add(new Notice("bad", $"{node.FullName} is failing: {node.Failed} of {node.Calls} calls.", () => PickNode(node.Key)));
+
+        var swallowed = flows.Where(f => f.Errors.Any(e => !e.Unhandled)).ToList();
+        if (swallowed.Count > 0)
+        {
+            var count = swallowed.Sum(f => f.Errors.Count(e => !e.Unhandled));
+            var first = swallowed[^1].Errors.First(e => !e.Unhandled);
+            var where = first.Origin is { File: not null } origin ? $" at {System.IO.Path.GetFileName(origin.File)}:{origin.Line}" : "";
+            notices.Add(new Notice("warn", $"{count} exception{(count == 1 ? " was" : "s were")} thrown and quietly handled. First: {first.Type.Split('.').Last()}{where}.",
+                () => OpenFlow(swallowed[^1].TraceId, null)));
+        }
+
+        foreach (var node in map.Nodes.Where(n => n.Kind == "service" && n.Calls > 0 && n.Variables.Count == 0).Take(2))
+            notices.Add(new Notice("warn", $"The app calls {node.Address}, which no variable in {envName} sets.", () => PickNode(node.Key)));
+
+        var missing = MissingReads;
+        if (missing.Count > 0)
+            notices.Add(new Notice("warn", $"The code reads {missing.Count} variable{(missing.Count == 1 ? "" : "s")} that {envName} does not define: {string.Join(", ", missing.Take(4).Select(r => r.Name))}{(missing.Count > 4 ? "…" : "")}.",
+                () => tab = "vars"));
+
+        foreach (var flow in flows.Where(IsRequest))
+        {
+            var repeated = flow.Steps.Values.Where(s => s.Category is "http" or "db").GroupBy(s => s.Title).FirstOrDefault(g => g.Count() >= 4);
+            if (repeated is null) continue;
+            notices.Add(new Notice("warn", $"One request made the same call {repeated.Count()} times: {Short(repeated.Key, 60)}.", () => OpenFlow(flow.TraceId, null)));
+            break;
+        }
+        return notices.Take(5).ToList();
+    }
+
+    /// <summary>Variables the code reads by name that neither this environment nor Windows provides.</summary>
+    private List<EnvRead> MissingReads => scan is null || locked
+        ? []
+        : scan.EnvReads.Where(r => !vars.Any(v => v.Name.Equals(r.Name, StringComparison.OrdinalIgnoreCase))
+                                && Environment.GetEnvironmentVariable(r.Name) is null
+                                && r.Name is not ("ASPNETCORE_ENVIRONMENT" or "DOTNET_ENVIRONMENT" or "ASPNETCORE_URLS")).ToList();
+
+    // ---------- flow: actions ----------
+
+    private void PickNode(string key)
+    {
+        selectedNode = selectedNode == key ? null : key;
+        flowId = null;
+        playing = false;
+    }
+
+    private void OpenFlow(string traceId, string? stepId)
+    {
+        flowId = traceId;
+        selectedNode = null;
+        playing = false;
+        eventIndex = 0;
+        if (stepId is not null && AllFlows.FirstOrDefault(f => f.TraceId == traceId) is { } flow)
+            eventIndex = Math.Max(0, EventsOf(flow, BuildMap(FlowsInView())).FindIndex(e => e.Step?.Id == stepId));
+        packetKey++;
+        tab = "flow";
+    }
+
+    private void CloseFlow()
+    {
+        flowId = null;
+        playing = false;
+    }
+
+    private void GoTo(int index)
+    {
+        eventIndex = index;
+        packetKey++;
+        playing = false;
+    }
+
+    private void Step(int delta, int count) => GoTo(Math.Clamp(eventIndex + delta, 0, Math.Max(0, count - 1)));
+
+    private void TogglePlay(int count)
+    {
+        if (playing) { playing = false; return; }
+        if (eventIndex >= count - 1) eventIndex = 0;
+        packetKey++;
+        playCount = count;
+        playing = true;
+        playTimer ??= new Timer(_ => InvokeAsync(() =>
+        {
+            if (!playing) return;
+            if (eventIndex < playCount - 1) { eventIndex++; packetKey++; }
+            else playing = false;
+            StateHasChanged();
+        }), null, 1300, 1300);
+    }
+
+    private void ClearFlows()
+    {
+        flowSession?.Flows?.Clear();
+        flowId = null;
+        selectedNode = null;
+        featureOfFlow.Clear();
+    }
+
+    // ---------- features ----------
+
+    private void EnsureScan()
+    {
+        if (repo is null || repo.Id == scanRepoId) return;
+        var (id, path) = (repo.Id, repo.Path);
+        scanRepoId = id;
+        scan = null;
+        featureFilter = null;
+        featureOfFlow.Clear();
+        _ = Task.Run(() =>
+        {
+            var result = FeatureScanner.Scan(path);
+            InvokeAsync(() =>
+            {
+                if (scanRepoId != id) return;
+                scan = result;
+                StateHasChanged();
+            });
+        });
+    }
+
+    private void Rescan()
+    {
+        scanRepoId = -1;
+        EnsureScan();
+    }
+
+    private Feature? FeatureOf(Flow flow)
+    {
+        if (scan is null || !IsRequest(flow)) return null;
+        if (featureOfFlow.TryGetValue(flow.TraceId, out var cached)) return cached;
+        var (verb, label, _) = Describe(flow);
+        return featureOfFlow[flow.TraceId] = scan.Match(verb, label);
+    }
+
+    private Dictionary<Feature, (int Calls, int Failed)> FeatureUsage()
+    {
+        var usage = new Dictionary<Feature, (int Calls, int Failed)>();
+        foreach (var flow in AllFlows)
+        {
+            if (FeatureOf(flow) is not { } feature) continue;
+            var (calls, failed) = usage.GetValueOrDefault(feature);
+            usage[feature] = (calls + 1, failed + (flow.Outcome == "failed" ? 1 : 0));
+        }
+        return usage;
+    }
+
+    private void ShowFeature(Feature feature)
+    {
+        featureFilter = feature;
+        flowId = null;
+        selectedNode = null;
+        tab = "flow";
+    }
+
+    private void OpenFeature(Feature feature) => Try(() =>
+    {
+        var current = repo!;
+        var target = targets.FirstOrDefault(t => t.Kind == "dotnet");
+        DebugSupport.OpenInRider(target is null ? null : DebugSupport.FindSolution(current, target), System.IO.Path.Combine(current.Path, feature.File), feature.Line);
+        Say($"Opened {System.IO.Path.GetFileName(feature.File)}:{feature.Line} in Rider.");
+    });
 
     private static string Pretty(string body)
     {
@@ -878,7 +1561,6 @@
                 <Icon Name="alert" Size="15" />
                 <span class="error-type">@error.Type.Split('.').Last()</span>
                 <span class="badge @(error.Unhandled ? "bad" : "warn")">@(error.Unhandled ? "unhandled" : "thrown, then handled")</span>
-                <span class="flow-meta">@error.At.ToLocalTime().ToString("HH:mm:ss.fff")</span>
             </div>
             <div class="error-message">@error.Message</div>
             @if (origin is not null)
@@ -886,13 +1568,13 @@
                 <button class="frame origin" title="Open in Rider" @onclick="() => OpenFrame(origin)">
                     <Icon Name="pin" Size="13" />
                     <span class="mono">@System.IO.Path.GetFileName(origin.File):@origin.Line</span>
-                    <span class="frame-method">@origin.Method</span>
+                    <span class="frame-method">@origin.Method.Split('.').Last()</span>
                     <Icon Name="external" Size="12" />
                 </button>
             }
             @if (error.Frames.Count > 1)
             {
-                <details>
+                <details class="more">
                     <summary>Call stack · @error.Frames.Count frames</summary>
                     @foreach (var frame in error.Frames)
                     {
@@ -1066,6 +1748,11 @@
     {
         (editing, formIsEdit, formName, formValue, formSecret) = (true, false, "", "", false);
         tab = "vars";
+    }
+
+    private void AddMissing(string name)
+    {
+        (editing, formIsEdit, formName, formValue, formSecret) = (true, false, name, "", Vault.LooksSecret(name));
     }
 
     private void EditVariable(Variable v)

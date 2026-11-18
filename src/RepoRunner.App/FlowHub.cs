@@ -167,7 +167,9 @@ public sealed partial class FlowHub : IDisposable
 
         lock (_flows)
         {
-            var traceId = Text("trace") ?? Loose;
+            // Exceptions outside any request are unrelated to each other; give each its own entry.
+            var traceId = Text("trace")
+                ?? (type == "exception" && e.TryGetProperty("key", out var loose) ? $"exception-{loose.GetInt64()}" : Loose);
             if (!_flows.TryGetValue(traceId, out var flow))
             {
                 if (_flows.Count >= MaxFlows)
