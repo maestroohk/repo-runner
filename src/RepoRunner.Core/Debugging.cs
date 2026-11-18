@@ -61,18 +61,88 @@ public static partial class DebugSupport
         return match.Success ? int.Parse(match.Groups[1].Value) : null;
     }
 
-    /// <summary>The solution Rider should open: the nearest .sln or .slnx from the project folder up to the repo root.</summary>
+    private static readonly HashSet<string> SolutionSkipDirs = new(StringComparer.OrdinalIgnoreCase)
+        { "bin", "obj", "node_modules", "packages", "publish", "dist", "TestResults" };
+
+    /// <summary>Every .sln and .slnx in the repo, nearest to the root first. Hidden folders such as .vs are skipped.</summary>
+    public static List<string> Solutions(RepoInfo repo)
+    {
+        var found = new List<string>();
+        void Walk(string dir, int depth)
+        {
+            try
+            {
+                found.AddRange(Directory.EnumerateFiles(dir, "*.sln").Concat(Directory.EnumerateFiles(dir, "*.slnx")));
+                if (depth >= 3) return;
+                foreach (var sub in Directory.EnumerateDirectories(dir))
+                {
+                    var name = Path.GetFileName(sub);
+                    if (!name.StartsWith('.') && !SolutionSkipDirs.Contains(name)) Walk(sub, depth + 1);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        Walk(repo.Path, 0);
+        return found.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(f => f.Count(c => c == Path.DirectorySeparatorChar)).ThenBy(f => f).ToList();
+    }
+
+    /// <summary>
+    /// The solution to debug with. An explicit choice on the target wins. Otherwise the one Rider has open, so the
+    /// session lands in the window that holds your breakpoints; a different file would open a second window.
+    /// Failing that, the one Rider used most recently, then the nearest to the project.
+    /// </summary>
     public static string? FindSolution(RepoInfo repo, TargetDef target)
     {
+        if (target.Solution is { Length: > 0 })
+        {
+            var chosen = Path.GetFullPath(Path.Combine(repo.Path, target.Solution));
+            if (File.Exists(chosen)) return chosen;
+        }
+        var candidates = Solutions(repo);
+        if (candidates.Count <= 1) return candidates.FirstOrDefault();
+
+        var rider = RiderRecentSolutions();
+        var known = candidates.Where(rider.ContainsKey).ToList();
+        if (known.Count > 0)
+            return known.OrderByDescending(c => rider[c].Open).ThenByDescending(c => rider[c].Activated).First();
+
         var dir = Path.GetDirectoryName(Path.Combine(repo.Path, target.Project ?? ""));
         while (dir is not null && dir.Length >= repo.Path.Length)
         {
-            var found = Directory.EnumerateFiles(dir, "*.sln").Concat(Directory.EnumerateFiles(dir, "*.slnx"))
-                .OrderBy(f => f.Length).FirstOrDefault();
-            if (found is not null) return found;
+            var near = candidates.FirstOrDefault(c => string.Equals(Path.GetDirectoryName(c), dir, StringComparison.OrdinalIgnoreCase));
+            if (near is not null) return near;
             dir = Path.GetDirectoryName(dir);
         }
-        return null;
+        return candidates[0];
+    }
+
+    /// <summary>Solutions Rider knows, from its recent-solutions file: whether each is open now and when it was last focused.</summary>
+    public static Dictionary<string, (bool Open, long Activated)> RiderRecentSolutions()
+    {
+        var result = new Dictionary<string, (bool, long)>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var jetbrains = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JetBrains");
+            if (!Directory.Exists(jetbrains)) return result;
+            var file = Directory.EnumerateDirectories(jetbrains, "Rider*")
+                .Select(d => Path.Combine(d, "options", "recentSolutions.xml"))
+                .Where(File.Exists).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+            if (file is null) return result;
+
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            foreach (var entry in System.Xml.Linq.XDocument.Load(file).Descendants("entry"))
+            {
+                var key = (string?)entry.Attribute("key");
+                var meta = entry.Descendants("RecentProjectMetaInfo").FirstOrDefault();
+                if (key is null || meta is null) continue;
+                var path = Path.GetFullPath(key.Replace("$USER_HOME$", home));
+                var activated = meta.Elements("option").FirstOrDefault(o => (string?)o.Attribute("name") == "activationTimestamp");
+                long.TryParse((string?)activated?.Attribute("value"), out var when);
+                result[path] = ((string?)meta.Attribute("opened") == "true", when);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Xml.XmlException) { }
+        return result;
     }
 
     public static string? FindRider()

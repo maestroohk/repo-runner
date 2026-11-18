@@ -145,6 +145,18 @@
                                 {
                                     <div class="target-warn"><Icon Name="alert" Size="14" /> @envName is missing @string.Join(", ", missing)</div>
                                 }
+                                @if (t.Kind == "dotnet" && solutions.Count > 1)
+                                {
+                                    <label class="solution-pick" title="Rider attaches in the window that has this solution open. Pick the one you work in.">
+                                        <Icon Name="bug" Size="13" /> Debug with
+                                        <select value="@SolutionOf(t)" @onchange="e => SetSolution(t, e.Value?.ToString())">
+                                            @foreach (var sln in solutions)
+                                            {
+                                                <option value="@sln">@sln@(openInRider.Contains(sln) ? "  (open in Rider)" : "")</option>
+                                            }
+                                        </select>
+                                    </label>
+                                }
                             </div>
                             <div class="target-actions">
                                 @if (live is not null)
@@ -460,6 +472,8 @@
     private List<RunSession> sessions = [];
     private List<string> unlocked = [];
     private List<string> folderSuggestions = [];
+    private List<string> solutions = [];
+    private HashSet<string> openInRider = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, int> counts = [];
     private readonly HashSet<string> revealed = new(StringComparer.OrdinalIgnoreCase);
 
@@ -546,12 +560,17 @@
         files = [];
         targets = [];
         counts = [];
+        solutions = [];
         if (repo is null) return;
 
         if (!envs.Any(e => e.Name == envName)) envName = envs[0].Name;
         var current = repo;
         var env = CurrentEnv;
         targets = Vaults.Use(v => v.Targets(current));
+        solutions = DebugSupport.Solutions(current).Select(f => System.IO.Path.GetRelativePath(current.Path, f)).ToList();
+        var rider = DebugSupport.RiderRecentSolutions();
+        openInRider = solutions.Where(f => rider.TryGetValue(System.IO.Path.Combine(current.Path, f), out var info) && info.Open)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         counts = envs.ToDictionary(e => e.Name, e => Vaults.Use(v => v.CountVars(Scope.Repo(current.Id), e)));
         locked = !Vaults.IsUnlocked(env);
         if (locked) return;
@@ -749,6 +768,18 @@
     }
 
     private void StopSession(RunSession session) => Sessions.Stop(session);
+
+    private string SolutionOf(TargetDef target) =>
+        DebugSupport.FindSolution(repo!, target) is { } full ? System.IO.Path.GetRelativePath(repo!.Path, full) : "";
+
+    private void SetSolution(TargetDef target, string? relative) => Try(() =>
+    {
+        if (string.IsNullOrEmpty(relative)) return;
+        var current = repo!;
+        target.Solution = relative;
+        Vaults.Use(v => v.SaveTarget(current, target));
+        Say($"{target.Name} will be debugged with {relative}.");
+    });
 
     private void Dismiss(RunSession session)
     {

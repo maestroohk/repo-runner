@@ -34,6 +34,8 @@ public sealed class TargetDef
     public List<string> Args { get; set; } = [];
     /// <summary>dotnet: value for ASPNETCORE_URLS, taken from the launch profile.</summary>
     public string? Urls { get; set; }
+    /// <summary>dotnet: the solution the IDE should debug with, relative to the repo root. Null = chosen automatically.</summary>
+    public string? Solution { get; set; }
     /// <summary>Names of other targets started alongside this one.</summary>
     public List<string> Companions { get; set; } = [];
     /// <summary>Variable names this target needs.</summary>

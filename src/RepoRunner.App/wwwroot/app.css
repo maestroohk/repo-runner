@@ -198,6 +198,8 @@ textarea.input { height: auto; padding: 9px 10px; resize: vertical; font-family:
 .target-title { display: flex; align-items: center; gap: 8px; font: 600 15px var(--display); }
 .target-sub { margin-top: 2px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .target-warn { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: var(--warn); font-size: 12.5px; }
+.solution-pick { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.solution-pick select { height: 26px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--bg); color: var(--text); font: 12.5px var(--mono); }
 .target-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .live-pill { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 9px; background: var(--ok-soft); color: var(--ok); font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
 
