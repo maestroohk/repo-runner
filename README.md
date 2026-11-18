@@ -16,13 +16,13 @@ Put `artifacts` on your `PATH`, or copy `rr.exe` somewhere that already is.
 
 ## The window
 
-`artifactspp\RepoRunner.exe` starts RepoRunner and opens it in your browser: repos on the left, an
+`artifacts\app\RepoRunner.exe` starts RepoRunner and opens it in your browser: repos on the left, an
 environment selector, Run / Watch / Stop buttons with live output, and the variables grid. Run
 `.\install-shortcut.ps1` once for a Desktop shortcut.
 
 It is a local web page, not an installed desktop program. The server listens on `127.0.0.1` only and every
 request needs the token issued at that launch. Protected environments stay unlocked for 15 minutes in memory.
-If the `.exe` is ever blocked by policy, start it with `dotnet artifactspp\RepoRunner.dll` instead.
+If the `.exe` is ever blocked by policy, start it with `dotnet artifacts\app\RepoRunner.dll` instead.
 
 ## First use from the command line, inside a repo
 
