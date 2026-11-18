@@ -64,6 +64,12 @@ public sealed class Flow
     public Dictionary<string, FlowStep> Steps { get; } = [];
     public List<FlowNote> Notes { get; } = [];
     public List<FlowError> Errors { get; } = [];
+    /// <summary>For a step, the app's own methods that led to it, innermost first.</summary>
+    public Dictionary<string, List<FlowFrame>> Stacks { get; } = [];
+
+    /// <summary>Every source file this flow is known to have run code from.</summary>
+    public IEnumerable<FlowFrame> KnownFrames =>
+        Stacks.Values.SelectMany(f => f).Concat(Errors.SelectMany(e => e.Frames)).Where(f => f.File is not null);
 
     public FlowStep? Root => Steps.Values.Where(s => s.ParentId is null || !Steps.ContainsKey(s.ParentId)).OrderBy(s => s.Start).FirstOrDefault();
 
@@ -205,6 +211,10 @@ public sealed partial class FlowHub : IDisposable
                             if (tag.Value.ValueKind == JsonValueKind.String) step.Tags[tag.Name] = Mask(tag.Value.GetString()!);
                     break;
                 }
+                case "stack":
+                    if (Text("id") is { } stepId && e.TryGetProperty("frames", out var calling))
+                        flow.Stacks[stepId] = ReadFrames(calling);
+                    break;
                 case "data":
                     flow.Notes.Add(new FlowNote(e.GetProperty("at").GetDateTime(), Text("id"), Text("label") ?? "Data", Text("title"),
                         Redact(Text("body") ?? "")));
@@ -224,11 +234,7 @@ public sealed partial class FlowHub : IDisposable
                         Unhandled = unhandled,
                         Key = key,
                     };
-                    if (e.TryGetProperty("frames", out var frames))
-                        foreach (var f in frames.EnumerateArray())
-                            error.Frames.Add(new FlowFrame(f.GetProperty("m").GetString() ?? "",
-                                f.TryGetProperty("f", out var file) ? file.GetString() : null,
-                                f.TryGetProperty("l", out var l) ? l.GetInt32() : 0));
+                    if (e.TryGetProperty("frames", out var frames)) error.Frames.AddRange(ReadFrames(frames));
                     flow.Errors.Add(error);
                     break;
                 }
@@ -236,6 +242,11 @@ public sealed partial class FlowHub : IDisposable
         }
         _changed();
     }
+
+    private static List<FlowFrame> ReadFrames(JsonElement frames) =>
+        frames.EnumerateArray().Select(f => new FlowFrame(f.GetProperty("m").GetString() ?? "",
+            f.TryGetProperty("f", out var file) ? file.GetString() : null,
+            f.TryGetProperty("l", out var line) ? line.GetInt32() : 0)).ToList();
 
     /// <summary>Vault secrets never reach the screen, whatever part of the app's data they turn up in.</summary>
     private string Mask(string text)

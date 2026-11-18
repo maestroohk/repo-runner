@@ -457,6 +457,21 @@
                                                                         <pre>@Pretty(note.Body)</pre>
                                                                     </div>
                                                                 }
+                                                                @if (ev.Frames is { Count: > 0 })
+                                                                {
+                                                                    <div class="capture">
+                                                                        <div class="capture-head"><Icon Name="code" Size="13" /> Made by your code</div>
+                                                                        <div class="callers">
+                                                                            @foreach (var frame in ev.Frames.Take(12))
+                                                                            {
+                                                                                <button class="frame" title="Open in Rider" @onclick="() => OpenFrame(frame)">
+                                                                                    <span class="frame-name">@ShortMethod(frame.Method)</span>
+                                                                                    <span class="mono frame-at">@System.IO.Path.GetFileName(frame.File):@frame.Line</span>
+                                                                                </button>
+                                                                            }
+                                                                        </div>
+                                                                    </div>
+                                                                }
                                                                 @if (ev.Step is not null)
                                                                 {
                                                                     <details class="more">
@@ -708,6 +723,17 @@
                                                 <span class="fact">Swallows errors <b class="@(nodes.Any(n => n.Kind == "catch") ? "warn-text" : "")">@nodes.Count(n => n.Kind == "catch")</b></span>
                                             </div>
                                         </div>
+                                        liveHits = LiveHits();
+                                        var ran = nodes.Count(n => n.Kind == "method" && liveHits.ContainsKey(LiveKey(n)));
+                                        @if (AllFlows.Count > 0)
+                                        {
+                                            <div class="live-note">
+                                                <span class="@(ran > 0 ? "pulse" : "lg idle")"></span>
+                                                @(ran > 0
+                                                    ? $"{ran} of the methods on this path were seen running in the current recording. They are marked below."
+                                                    : "None of these methods has been seen running in the current recording yet. Use this feature in the app and they light up.")
+                                            </div>
+                                        }
                                         <div class="code-tree">
                                             @CodeTree(trace, 0)
                                         </div>
@@ -1214,7 +1240,7 @@
 
     /// <summary>One hop of a flow: a message between two devices, or something that happened inside the app.</summary>
     private sealed record FlowEvent(string Direction, string Title, string? NodeKey, string? EdgeKey, string? Path, string Motion, bool Failed,
-        int? Code, double? Ms, FlowStep? Step, FlowError? Error, List<FlowNote> Notes, DateTime At);
+        int? Code, double? Ms, FlowStep? Step, FlowError? Error, List<FlowNote> Notes, DateTime At, List<FlowFrame>? Frames = null);
 
     private sealed record Call(Flow Flow, FlowStep Step, string? Verb, string Label, double Ms, bool Failed);
 
@@ -1443,7 +1469,8 @@
                 {
                     var node = map.Nodes.FirstOrDefault(n => n.Key == DeviceOf(step));
                     events.Add(new FlowEvent($"{app} → {node?.FullName ?? host ?? "a dependency"}", title, node?.Key ?? "app", node?.Key,
-                        node is null ? null : PathOf(node.Key), "round", step.Failed, step.StatusCode, step.Ms, step, null, captured, step.Start));
+                        node is null ? null : PathOf(node.Key), "round", step.Failed, step.StatusCode, step.Ms, step, null, captured, step.Start,
+                        flow.Stacks.GetValueOrDefault(step.Id)));
                     break;
                 }
                 default:
@@ -1650,6 +1677,46 @@
         return traces.TryGetValue(key, out var known) ? known : traces[key] = code!.Trace(type, entry);
     }
 
+    // ---------- what really ran, laid over the code path ----------
+
+    private Dictionary<string, (int Runs, int Failed, int Threw)> liveHits = [];
+    private Dictionary<string, Feature>? pageByFile;
+
+    private static string ShortMethod(string method)
+    {
+        var parts = method.Split('.');
+        return parts.Length >= 2 ? $"{parts[^2]}.{parts[^1]}" : method;
+    }
+
+    private static string LiveKey(string file, string method) => file.ToLowerInvariant() + "|" + method.Split('.').Last();
+
+    private string LiveKey(CodeNode node) =>
+        node.File is null ? "" : LiveKey(System.IO.Path.GetFullPath(System.IO.Path.Combine(repo!.Path, node.File)), node.Title);
+
+    /// <summary>
+    /// For each of the app's methods seen in the recording: how many operations it was on the stack for, how many
+    /// of those failed, and how many exceptions passed through it.
+    /// </summary>
+    private Dictionary<string, (int Runs, int Failed, int Threw)> LiveHits()
+    {
+        var hits = new Dictionary<string, (int Runs, int Failed, int Threw)>();
+        void Count(IEnumerable<FlowFrame> frames, int failed, int threw)
+        {
+            foreach (var key in frames.Where(f => f.File is not null).Select(f => LiveKey(f.File!, f.Method)).Distinct())
+            {
+                var (runs, bad, thrown) = hits.GetValueOrDefault(key);
+                hits[key] = (runs + (threw > 0 ? 0 : 1), bad + failed, thrown + threw);
+            }
+        }
+        foreach (var flow in AllFlows)
+        {
+            foreach (var (stepId, frames) in flow.Stacks)
+                Count(frames, flow.Steps.TryGetValue(stepId, out var step) && step.Failed ? 1 : 0, 0);
+            foreach (var error in flow.Errors) Count(error.Frames, 0, 1);
+        }
+        return hits;
+    }
+
     private void OpenNode(CodeNode node) => Try(() =>
     {
         if (node.File is null) return;
@@ -1687,6 +1754,12 @@
         @if (node.Note is not null)
         {
             <span class="badge">@node.Note</span>
+        }
+        @if (node.Kind == "method" && liveHits.TryGetValue(LiveKey(node), out var hit))
+        {
+            <span class="badge @(hit.Failed > 0 || hit.Threw > 0 ? "bad" : "ok")" title="Seen in the current recording">
+                ran @(hit.Runs)×@(hit.Failed > 0 ? $" · {hit.Failed} failed" : "")@(hit.Threw > 0 ? $" · threw {hit.Threw}" : "")
+            </span>
         }
         <button class="code-where" title="Open in Rider" @onclick="() => OpenNode(node)" @onclick:stopPropagation="true" @onclick:preventDefault="true">
             @System.IO.Path.GetFileName(node.File):@node.Line
@@ -1730,6 +1803,7 @@
             {
                 if (scanRepoId != id) return;
                 scan = result;
+                pageByFile = null;
                 StateHasChanged();
             });
         });
@@ -1743,10 +1817,31 @@
 
     private Feature? FeatureOf(Flow flow)
     {
-        if (scan is null || !IsRequest(flow)) return null;
+        if (scan is null) return null;
         if (featureOfFlow.TryGetValue(flow.TraceId, out var cached)) return cached;
-        var (verb, label, _) = Describe(flow);
-        return featureOfFlow[flow.TraceId] = scan.Match(verb, label);
+
+        Feature? feature = null;
+        if (IsRequest(flow))
+        {
+            var (verb, label, _) = Describe(flow);
+            feature = scan.Match(verb, label);
+        }
+        if (feature is null)
+        {
+            // A Blazor button click arrives over the circuit, not as a request to the page's route.
+            // The page it belongs to is the one whose code was running.
+            pageByFile ??= scan.Features.Where(f => f.Kind == "page")
+                .GroupBy(f => CodeIndex.ComponentKey(f.File), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            foreach (var frame in flow.KnownFrames)
+            {
+                var relative = System.IO.Path.GetRelativePath(scan.Root, frame.File!);
+                if (pageByFile.TryGetValue(CodeIndex.ComponentKey(relative), out feature)) break;
+            }
+        }
+        // Only a match is remembered: a flow still in progress may gain the evidence later.
+        if (feature is not null) featureOfFlow[flow.TraceId] = feature;
+        return feature;
     }
 
     private Dictionary<Feature, (int Calls, int Failed)> FeatureUsage()

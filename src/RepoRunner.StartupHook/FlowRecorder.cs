@@ -114,6 +114,9 @@ internal static class FlowRecorder
                     case "Microsoft.AspNetCore.Hosting.UnhandledException":
                         if (Get(e.Value, "exception") is Exception ex) OnException(ex, unhandled: true);
                         break;
+                    case "System.Net.Http.HttpRequestOut.Start":
+                        CallStack();
+                        break;
                     case "System.Net.Http.HttpRequestOut.Stop":
                         OutgoingHttp(e.Value);
                         break;
@@ -219,27 +222,70 @@ internal static class FlowRecorder
             w.WriteString("message", Cut(ex.Message, 4000));
             w.WriteBoolean("unhandled", unhandled);
             w.WriteNumber("key", RuntimeHelpers.GetHashCode(ex));
-            if (frames is null) return;
-            w.WriteStartArray("frames");
-            var written = 0;
-            foreach (var frame in frames)
-            {
-                var method = frame.GetMethod();
-                if (method?.DeclaringType is null || method.DeclaringType == typeof(FlowRecorder)) continue;
-                var file = frame.GetFileName();
-                if (file is null && written >= 12) continue; // keep every frame with source, a few without
-                w.WriteStartObject();
-                w.WriteString("m", method.DeclaringType.FullName + "." + method.Name);
-                if (file is not null)
-                {
-                    w.WriteString("f", file);
-                    w.WriteNumber("l", frame.GetFileLineNumber());
-                }
-                w.WriteEndObject();
-                if (++written >= 40) break;
-            }
-            w.WriteEndArray();
+            if (frames is not null) WriteFrames(w, frames, sourceOnly: false);
         });
+    }
+
+    /// <summary>The app's own methods that led to the operation now starting, innermost first.</summary>
+    private static void CallStack()
+    {
+        var activity = Activity.Current;
+        if (activity is null) return;
+        var frames = new StackTrace(1, true).GetFrames();
+        Emit(w =>
+        {
+            w.WriteString("type", "stack");
+            WriteIds(w, activity);
+            WriteFrames(w, frames, sourceOnly: true);
+        });
+    }
+
+    private static void WriteFrames(Utf8JsonWriter w, StackFrame[] frames, bool sourceOnly)
+    {
+        w.WriteStartArray("frames");
+        var written = 0;
+        string? previous = null;
+        foreach (var frame in frames)
+        {
+            var method = frame.GetMethod();
+            var type = method?.DeclaringType;
+            if (method is null || type is null || type == typeof(FlowRecorder)) continue;
+            var file = frame.GetFileName();
+            // Frames with source are the developer's code. Keep a few others only when the full picture is wanted.
+            if (file is null && (sourceOnly || written >= 12)) continue;
+
+            // Async methods and lambdas run inside compiler-made types; report the method the developer wrote.
+            var name = method.Name;
+            if (type.Name.StartsWith("<", StringComparison.Ordinal) && type.DeclaringType is not null)
+            {
+                name = Written(type.Name) ?? name;
+                type = type.DeclaringType;
+            }
+            if (name.StartsWith("<", StringComparison.Ordinal)) name = Written(name) ?? name;
+
+            var line = frame.GetFileLineNumber();
+            var id = type.FullName + "." + name + ":" + line;
+            if (id == previous) continue;
+            previous = id;
+
+            w.WriteStartObject();
+            w.WriteString("m", type.FullName + "." + name);
+            if (file is not null)
+            {
+                w.WriteString("f", file);
+                w.WriteNumber("l", line);
+            }
+            w.WriteEndObject();
+            if (++written >= 40) break;
+        }
+        w.WriteEndArray();
+    }
+
+    /// <summary>"&lt;SearchAsync&gt;d__5" → "SearchAsync". Null when the brackets hold no name.</summary>
+    private static string? Written(string compilerName)
+    {
+        var close = compilerName.IndexOf('>');
+        return close > 1 ? compilerName.Substring(1, close - 1) : null;
     }
 
     // ---------- plumbing ----------

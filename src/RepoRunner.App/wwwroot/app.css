@@ -453,6 +453,12 @@ summary.code-row::-webkit-details-marker { display: none; }
 .code-where { margin-left: auto; padding: 2px 6px; border: 0; border-radius: 5px; background: none; color: var(--muted); font: 11.5px var(--mono); }
 .code-where:hover { background: var(--surface); color: var(--accent); }
 
+.callers { display: flex; flex-direction: column; padding: 4px; }
+.frame-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12px var(--mono); color: var(--text); }
+.frame-at { flex: none; color: var(--muted); }
+.live-note { display: flex; align-items: center; gap: 9px; margin: 0 0 10px; font-size: 12.5px; color: var(--text-2); }
+.live-note .lg { margin: 0; }
+
 /* ---------- features ---------- */
 .feature-group { display: flex; align-items: center; gap: 8px; margin: 18px 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .feature-group:first-of-type { margin-top: 4px; }
