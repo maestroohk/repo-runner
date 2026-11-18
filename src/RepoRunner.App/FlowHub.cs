@@ -23,7 +23,8 @@ public sealed class FlowStep
 
     /// <summary>request | http | db | step</summary>
     public string Category =>
-        Kind == "Server" ? "request"
+        // Only real HTTP requests count; a Blazor circuit message is also "Server" kind but has no method.
+        Kind == "Server" && Tag("http.request.method", "http.method") is not null ? "request"
         : Tag("db.system", "db.system.name", "db.statement", "db.query.text") is not null ? "db"
         : Tag("url.full", "http.url") is not null ? "http"
         : "step";
