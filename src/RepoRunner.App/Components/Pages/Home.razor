@@ -795,6 +795,20 @@
                                     </div>
 
                                     <div class="ov-tools">
+                                        <label class="compare-pick" title="Line this run up against another one and show where they differ">
+                                            <Icon Name="compare" Size="14" /> Compare with
+                                            <select value="@(compareId ?? "")" @onchange="e => { compareId = string.IsNullOrEmpty(e.Value?.ToString()) ? null : e.Value!.ToString(); openDiff = null; }">
+                                                <option value="">nothing</option>
+                                                @if (opened is not null && canRecord)
+                                                {
+                                                    <option value="live">Current run</option>
+                                                }
+                                                @foreach (var other in saved.Where(p => p.Id != opened?.Id))
+                                                {
+                                                    <option value="@other.Id">@other.Name (@other.Created.ToString("d MMM HH:mm"))</option>
+                                                }
+                                            </select>
+                                        </label>
                                         <div class="search">
                                             <Icon Name="search" />
                                             <input class="input" placeholder="Find a command, address or value" @bind="procFilter" @bind:event="oninput" />
@@ -807,6 +821,13 @@
                                     </div>
                                 </div>
 
+                                var baseline = compareId == "live" ? null : saved.FirstOrDefault(p => p.Id == compareId);
+                                @if (compareId is not null && (compareId == "live" || baseline is not null) && compareId != (opened?.Id ?? "live"))
+                                {
+                                    @CompareView(StepsOf(ProcessFlows(baseline)), steps, baseline?.Name ?? "Current run", opened?.Name ?? "Current run")
+                                }
+                                else
+                                {
                                 @if (visible.Count == 0)
                                 {
                                     <div class="state small"><p>No step matches. Clear the search or untick "Problems only".</p></div>
@@ -909,6 +930,7 @@
                                         </section>
                                     }
                                 </div>
+                                }
                             }
                         }
                         else if (tab == "features")
@@ -1990,6 +2012,7 @@
     {
         procId = id;
         (openCall, allSteps, procSystem, procProblemsOnly, procFilter) = (null, null, null, false, "");
+        (compareId, openDiff) = (null, null);
         toggledSteps.Clear();
     }
 
@@ -2114,7 +2137,7 @@
 
     /// <summary>One call to another system, with what it carried summarised for reading at a glance.</summary>
     private sealed record ProcCall(FlowStep Step, FlowBody? Body, string Verb, string Name, string Endpoint, string System, string SystemKey,
-        bool Failed, bool Soft, bool Empty, List<(string Name, string Value)> Sent, string Returned);
+        bool Failed, bool Soft, bool Empty, List<(string Name, string Value)> Sent, string Returned, int? Rows);
 
     /// <summary>Something the user did, and the calls it caused. Count is above 1 when identical quiet steps were merged.</summary>
     private sealed record ProcStep(int Number, Flow Flow, string? Verb, string Label, List<ProcCall> Calls, int Count, string? Page)
@@ -2205,17 +2228,18 @@
     /// <summary>
     /// What came back, in a few words, and whether the service itself reported a problem while still answering 200.
     /// </summary>
-    private static (string Text, bool Soft) ReturnedSummary(string? response, int? status)
+    private static (string Text, bool Soft, int? Rows) ReturnedSummary(string? response, int? status)
     {
-        if (response is null) return (status is null ? "no response recorded" : "no body", false);
+        if (response is null) return (status is null ? "no response recorded" : "no body", false, null);
         var text = response.Trim();
-        if (text.Length == 0) return ("empty", false);
-        if (text[0] is not ('{' or '[') || text.Length > 2_000_000) return (Clip(Whitespace(text), 110), false);
+        if (text.Length == 0) return ("empty", false, null);
+        if (text[0] is not ('{' or '[') || text.Length > 2_000_000) return (Clip(Whitespace(text), 110), false, null);
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(text);
             var root = doc.RootElement;
-            if (root.ValueKind == System.Text.Json.JsonValueKind.Array) return ($"{root.GetArrayLength()} items · {Size(response)}", false);
+            if (root.ValueKind == System.Text.Json.JsonValueKind.Array)
+                return ($"{root.GetArrayLength()} items · {Size(response)}", false, root.GetArrayLength());
 
             string? Text(string name) => root.EnumerateObject().Where(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
                 .Select(p => Scalar(p.Value)).FirstOrDefault();
@@ -2242,9 +2266,9 @@
             else if (description is not null && rows is null) parts.Add(Clip(description, 60));
             if (rows is not null) parts.Add(rows == 1 ? "1 row" : $"{rows} rows");
             parts.Add(Size(response));
-            return (string.Join(" · ", parts), failed);
+            return (string.Join(" · ", parts), failed, rows);
         }
-        catch (System.Text.Json.JsonException) { return (Clip(Whitespace(text), 110), false); }
+        catch (System.Text.Json.JsonException) { return (Clip(Whitespace(text), 110), false, null); }
     }
 
     private static System.Text.RegularExpressions.Regex NothingFound() => new(
@@ -2274,12 +2298,12 @@
                 var (callVerb, path, _) = Describe(step);
                 flow.Bodies.TryGetValue(step.Id, out var body);
                 var intent = Intent(body?.Request);
-                var (returned, soft) = ReturnedSummary(body?.Response, step.StatusCode);
+                var (returned, soft, rowCount) = ReturnedSummary(body?.Response, step.StatusCode);
                 // Some services answer "nothing matched" with 404. That is an answer, not a breakdown.
                 var empty = step.StatusCode == 404 && body?.Response is { Length: < 600 } said && NothingFound().IsMatch(said);
                 calls.Add(new ProcCall(step, body, callVerb ?? "CALL", intent ?? path, intent is null ? "" : path.Split('/').Last(),
                     names.GetValueOrDefault(key) ?? key.Split(':')[0], key, step.Failed && !empty, soft && !step.Failed, empty,
-                    SentSummary(body?.Request), empty ? "nothing found (404)" : returned));
+                    SentSummary(body?.Request), empty ? "nothing found (404)" : returned, empty ? 0 : rowCount));
             }
 
             // Typing in a field fires one event per keystroke: show the run once.
@@ -2332,6 +2356,304 @@
         allSteps = open;
         toggledSteps.Clear();
     }
+
+    // ---------- compare two runs ----------
+
+    private sealed record FieldDiff(string Path, string? Old, string? New, bool Volatile);
+
+    private sealed record CallDiff(ProcCall? Base, ProcCall? Now, List<string> Notes, List<FieldDiff> Sent, List<FieldDiff> Reply)
+    {
+        /// <summary>added | removed | changed | same</summary>
+        public string Kind => Base is null ? "added" : Now is null ? "removed" : Notes.Count > 0 ? "changed" : "same";
+        public bool Differs => Kind != "same";
+    }
+
+    private sealed record StepDiff(ProcStep? Base, ProcStep? Now, List<CallDiff> Calls)
+    {
+        public bool Differs => Base is null || Now is null || Calls.Any(c => c.Differs) || Base.Flow.Errors.Count != Now.Flow.Errors.Count;
+    }
+
+    private string? compareId;
+    private bool diffOnly = true;
+    private string? openDiff;
+
+    /// <summary>
+    /// Lines two sequences up by key, keeping order: the longest run of matching items stays paired, and what
+    /// falls between is reported as only on one side. -1 marks the missing side.
+    /// </summary>
+    private static List<(int A, int B)> Align<T>(IReadOnlyList<T> a, IReadOnlyList<T> b, Func<T, string> key)
+    {
+        var ka = a.Select(key).ToArray();
+        var kb = b.Select(key).ToArray();
+        var longest = new int[ka.Length + 1, kb.Length + 1];
+        for (var i = ka.Length - 1; i >= 0; i--)
+            for (var j = kb.Length - 1; j >= 0; j--)
+                longest[i, j] = ka[i] == kb[j] ? longest[i + 1, j + 1] + 1 : Math.Max(longest[i + 1, j], longest[i, j + 1]);
+
+        var pairs = new List<(int, int)>();
+        int x = 0, y = 0;
+        while (x < ka.Length && y < kb.Length)
+        {
+            if (ka[x] == kb[y]) pairs.Add((x++, y++));
+            else if (longest[x + 1, y] >= longest[x, y + 1]) pairs.Add((x++, -1));
+            else pairs.Add((-1, y++));
+        }
+        while (x < ka.Length) pairs.Add((x++, -1));
+        while (y < kb.Length) pairs.Add((-1, y++));
+        return pairs;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex ChangesEveryRun = new(
+        @"^(\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}.*)?|\d{1,2}:\d{2}:\d{2}.*|\d{1,2}/\d{1,2}/\d{2,4}.*|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9+/=_\-\.]{28,})$");
+
+    /// <summary>A value that is expected to differ between any two runs: a date, a time, an identifier made on the spot.</summary>
+    private static bool Volatile(string? value) => value is not null && ChangesEveryRun.IsMatch(value.Trim());
+
+    private static void Flatten(System.Text.Json.JsonElement element, string path, Dictionary<string, string> into, int depth)
+    {
+        if (into.Count >= 800 || depth > 8) return;
+        switch (element.ValueKind)
+        {
+            case System.Text.Json.JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                    Flatten(property.Value, path.Length == 0 ? property.Name : $"{path}.{property.Name}", into, depth + 1);
+                break;
+            case System.Text.Json.JsonValueKind.Array:
+                var index = 0;
+                foreach (var item in element.EnumerateArray()) Flatten(item, $"{path}[{index++}]", into, depth + 1);
+                break;
+            default:
+                into[path] = Scalar(element);
+                break;
+        }
+    }
+
+    private static Dictionary<string, string> Fields(string? body)
+    {
+        var fields = new Dictionary<string, string>();
+        if (string.IsNullOrWhiteSpace(body)) return fields;
+        var text = body.Trim();
+        if (text[0] is '{' or '[' && text.Length < 2_000_000)
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(text);
+                Flatten(doc.RootElement, "", fields, 0);
+                return fields;
+            }
+            catch (System.Text.Json.JsonException) { }
+        }
+        fields["(text)"] = Clip(Whitespace(text), 400);
+        return fields;
+    }
+
+    private static List<FieldDiff> DiffFields(string? before, string? after)
+    {
+        var (old, now) = (Fields(before), Fields(after));
+        var diffs = new List<FieldDiff>();
+        foreach (var path in old.Keys.Concat(now.Keys.Where(k => !old.ContainsKey(k))))
+        {
+            old.TryGetValue(path, out var was);
+            now.TryGetValue(path, out var isNow);
+            if (was == isNow) continue;
+            var hidden = Sensitive(path);
+            diffs.Add(new FieldDiff(path, hidden && was is not null ? "••••" : was, hidden && isNow is not null ? "••••" : isNow,
+                (was is null || Volatile(was)) && (isNow is null || Volatile(isNow)) && (was is not null || isNow is not null) && (Volatile(was) || Volatile(isNow))));
+        }
+        return diffs;
+    }
+
+    private static string Standing(ProcCall call) => call.Failed ? "failed" : call.Soft ? "an error in the reply" : call.Empty ? "nothing found" : "ok";
+
+    private static string AddressOf(ProcCall call) =>
+        Uri.TryCreate(call.Step.Tag("rr.url", "url.full", "http.url"), UriKind.Absolute, out var uri) ? uri.PathAndQuery : "";
+
+    private static CallDiff CompareCalls(ProcCall before, ProcCall after)
+    {
+        var notes = new List<string>();
+        if (before.Step.StatusCode != after.Step.StatusCode) notes.Add($"status {before.Step.StatusCode} → {after.Step.StatusCode}");
+        if (Standing(before) != Standing(after)) notes.Add($"was {Standing(before)}, now {Standing(after)}");
+        if (AddressOf(before) != AddressOf(after)) notes.Add($"address {Clip(AddressOf(before), 60)} → {Clip(AddressOf(after), 60)}");
+
+        var sent = DiffFields(before.Body?.Request, after.Body?.Request);
+        var sentReal = sent.Where(d => !d.Volatile).ToList();
+        foreach (var change in sentReal.Take(3)) notes.Add($"sent {change.Path}: {Clip(change.Old ?? "nothing", 30)} → {Clip(change.New ?? "nothing", 30)}");
+        if (sentReal.Count > 3) notes.Add($"{sentReal.Count - 3} more inputs differ");
+
+        var reply = DiffFields(before.Body?.Response, after.Body?.Response);
+        var replyReal = reply.Count(d => !d.Volatile);
+        if (before.Rows != after.Rows) notes.Add($"rows returned {before.Rows?.ToString() ?? "none"} → {after.Rows?.ToString() ?? "none"}");
+        else if (replyReal > 0) notes.Add($"{replyReal} field{(replyReal == 1 ? "" : "s")} in the reply differ");
+
+        if (after.Step.Ms > before.Step.Ms * 3 && after.Step.Ms - before.Step.Ms > 500)
+            notes.Add($"slower: {before.Step.Ms:0} ms → {after.Step.Ms:0} ms");
+        return new CallDiff(before, after, notes, sent, reply);
+    }
+
+    private static List<StepDiff> CompareSteps(List<ProcStep> before, List<ProcStep> after)
+    {
+        var diffs = new List<StepDiff>();
+        foreach (var (a, b) in Align(before, after, s => $"{s.Verb}|{s.Label}"))
+        {
+            var (was, now) = (a < 0 ? null : before[a], b < 0 ? null : after[b]);
+            var calls = new List<CallDiff>();
+            if (was is not null && now is not null)
+            {
+                foreach (var (i, j) in Align(was.Calls, now.Calls, c => $"{c.SystemKey}|{c.Verb}|{c.Name}|{c.Endpoint}"))
+                    calls.Add(i < 0 ? new CallDiff(null, now.Calls[j], [], [], [])
+                        : j < 0 ? new CallDiff(was.Calls[i], null, [], [], [])
+                        : CompareCalls(was.Calls[i], now.Calls[j]));
+            }
+            else
+                calls.AddRange((was ?? now)!.Calls.Select(c => was is null ? new CallDiff(null, c, [], [], []) : new CallDiff(c, null, [], [], [])));
+            diffs.Add(new StepDiff(was, now, calls));
+        }
+        return diffs;
+    }
+
+    /// <summary>The earliest point at which this run stops matching the baseline, in a sentence.</summary>
+    private static string FirstDifference(List<StepDiff> diffs)
+    {
+        var first = diffs.FirstOrDefault(d => d.Differs);
+        if (first is null) return "The two runs match.";
+        var step = first.Now ?? first.Base!;
+        var where = $"step {step.Number} ({step.Verb?.ToLowerInvariant()} {step.Label})".Replace("( ", "(");
+        if (first.Now is null) return $"The runs part ways at {where}: it happened in the baseline but not in this run.";
+        if (first.Base is null) return $"The runs part ways at {where}: it happened in this run but not in the baseline.";
+        var call = first.Calls.FirstOrDefault(c => c.Differs);
+        if (call is null) return $"The runs part ways at {where}: the number of exceptions differs.";
+        var name = (call.Now ?? call.Base!).Name;
+        return call.Kind switch
+        {
+            "added" => $"The runs part ways at {where}: this run called {name}, which the baseline did not.",
+            "removed" => $"The runs part ways at {where}: the baseline called {name}, and this run did not.",
+            _ => $"The runs part ways at {where}: {name} — {call.Notes[0]}.",
+        };
+    }
+
+    private RenderFragment CompareView(List<ProcStep> before, List<ProcStep> after, string beforeName, string afterName) => __builder =>
+    {
+        var diffs = CompareSteps(before, after);
+        var changedSteps = diffs.Count(d => d.Differs);
+        var calls = diffs.SelectMany(d => d.Calls).ToList();
+        <div class="callout @(changedSteps == 0 ? "calm" : "")">
+            <Icon Name="@(changedSteps == 0 ? "check" : "alert")" />
+            <div>
+                <b>@FirstDifference(diffs)</b>
+                <div class="flow-meta">
+                    “@afterName” against the baseline “@beforeName”: @changedSteps of @diffs.Count steps differ;
+                    @calls.Count(c => c.Kind == "changed") calls changed, @calls.Count(c => c.Kind == "added") new, @calls.Count(c => c.Kind == "removed") missing.
+                    Dates, times and generated identifiers are not counted as differences.
+                </div>
+            </div>
+        </div>
+        <div class="ov-tools compare-tools">
+            <label class="check"><input type="checkbox" @bind="diffOnly" /> Differences only</label>
+        </div>
+        <div class="psteps">
+            @foreach (var diff in diffs.Where(d => !diffOnly || d.Differs))
+            {
+                var step = diff.Now ?? diff.Base!;
+                var state = diff.Now is null ? "removed" : diff.Base is null ? "added" : diff.Differs ? "warn" : "";
+                <section class="pstep open @state">
+                    <div class="pstep-head static">
+                        <span class="event-n">@step.Number</span>
+                        @if (step.Verb is not null)
+                        {
+                            <span class="verb v-@step.Verb.ToLowerInvariant()">@step.Verb</span>
+                        }
+                        <span class="pstep-title">@step.Label</span>
+                        <span class="pstep-sum">@(diff.Now is null ? "only in the baseline" : diff.Base is null ? "only in this run" : diff.Differs ? "differs" : "same")</span>
+                    </div>
+                    <div class="pstep-body">
+                        @foreach (var call in diff.Calls.Where(c => !diffOnly || c.Differs))
+                        {
+                            var shown = call.Now ?? call.Base!;
+                            var key = (call.Base?.Step.Id ?? "-") + "|" + (call.Now?.Step.Id ?? "-");
+                            var isOpen = openDiff == key;
+                            var fields = call.Sent.Select(f => (Side: "sent", Field: f)).Concat(call.Reply.Select(f => (Side: "reply", Field: f))).ToList();
+                            <div class="pcall diff-@call.Kind @(isOpen ? "open" : "")">
+                                <button class="pcall-head" @onclick="() => openDiff = isOpen ? null : key">
+                                    <span class="badge @(call.Kind == "same" ? "ok" : call.Kind == "changed" ? "warn" : "bad")">@(call.Kind == "added" ? "new" : call.Kind == "removed" ? "missing" : call.Kind)</span>
+                                    <span class="pcall-name">@shown.Name</span>
+                                    <span class="pcall-to">@shown.Verb → @shown.System</span>
+                                    <span class="spacer"></span>
+                                    <Icon Name="@(isOpen ? "up" : "down")" Size="14" />
+                                </button>
+                                @if (call.Notes.Count > 0)
+                                {
+                                    <div class="pcall-io">
+                                        @foreach (var note in call.Notes)
+                                        {
+                                            <span class="diff-note">@note</span>
+                                        }
+                                    </div>
+                                }
+                                @if (isOpen)
+                                {
+                                    <div class="pcall-body">
+                                        @if (fields.Count > 0)
+                                        {
+                                            <table class="diff-table">
+                                                <thead><tr><th></th><th>Field</th><th>Baseline</th><th>This run</th></tr></thead>
+                                                <tbody>
+                                                    @foreach (var (side, field) in fields.OrderBy(f => f.Field.Volatile).Take(60))
+                                                    {
+                                                        <tr class="@(field.Volatile ? "dim" : "")">
+                                                            <td>@side</td>
+                                                            <td>@field.Path</td>
+                                                            <td>@(field.Old ?? "—")</td>
+                                                            <td>@(field.New ?? "—")</td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                            @if (fields.Count > 60)
+                                            {
+                                                <div class="flow-meta">@(fields.Count - 60) more differing fields are not listed.</div>
+                                            }
+                                        }
+                                        <div class="io-grid">
+                                            <div class="side">
+                                                <div class="needs-title">Baseline</div>
+                                                @if (call.Base?.Body is { } was)
+                                                {
+                                                    @BodyCards(was)
+                                                }
+                                                else
+                                                {
+                                                    <div class="flow-meta">@(call.Base is null ? "This call was not made." : "No body captured.")</div>
+                                                }
+                                            </div>
+                                            <div class="side">
+                                                <div class="needs-title">This run</div>
+                                                @if (call.Now?.Body is { } isNow)
+                                                {
+                                                    @BodyCards(isNow)
+                                                }
+                                                else
+                                                {
+                                                    <div class="flow-meta">@(call.Now is null ? "This call was not made." : "No body captured.")</div>
+                                                }
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        }
+                        @if (diff.Base is not null && diff.Now is not null && diff.Base.Flow.Errors.Count != diff.Now.Flow.Errors.Count)
+                        {
+                            <div class="diff-note">exceptions @diff.Base.Flow.Errors.Count → @diff.Now.Flow.Errors.Count</div>
+                            @foreach (var error in diff.Now.Flow.Errors)
+                            {
+                                @ErrorCard(error)
+                            }
+                        }
+                    </div>
+                </section>
+            }
+        </div>
+    };
 
     // ---------- code paths ----------
 
