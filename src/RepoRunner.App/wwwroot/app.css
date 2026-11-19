@@ -431,6 +431,7 @@ button.frame:hover { background: var(--surface-3); color: var(--text); }
 .proc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .callout.calm { background: var(--ok-soft); }
 .callout.calm .icon { color: var(--ok); }
+.replay-box { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .miss { margin-top: 4px; font-size: 12px; color: var(--text); }
 .link-btn { padding: 0 4px; border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600; }
 .link-btn:hover { text-decoration: underline; }

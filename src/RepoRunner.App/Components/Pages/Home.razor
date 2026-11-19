@@ -718,16 +718,40 @@
                             @if (replay?.Mock is { } mock)
                             {
                                 var hits = mock.Hits();
-                                var unmatched = hits.Where(h => !h.Matched).ToList();
-                                <div class="callout @(unmatched.Count > 0 ? "" : "calm")">
-                                    <Icon Name="@(unmatched.Count > 0 ? "alert" : "check")" />
-                                    <div>
-                                        <b>Replaying “@mock.ProcessName”.</b>
-                                        The app's calls to @string.Join(", ", mock.Hosts) are answered from the recording, not the real services.
-                                        @hits.Count(h => h.Matched) answered so far@(unmatched.Count > 0 ? $"; {unmatched.Count} were not in the recording — this is where this run departs from the recorded one:" : ".")
-                                        @foreach (var miss in unmatched.DistinctBy(h => h.Method + h.PathAndQuery).Take(6))
+                                var fromRecording = hits.Count(h => h.Source == "recording");
+                                var real = hits.Where(h => h.Source == "real").ToList();
+                                var failed = hits.Where(h => h.Source == "failed").ToList();
+                                <div class="callout @(failed.Count > 0 ? "" : "calm")">
+                                    <Icon Name="@(failed.Count > 0 ? "alert" : "play")" />
+                                    <div class="replay-box">
+                                        <b>The app is running against “@mock.ProcessName”.</b>
+                                        <div>
+                                            Use @repo.Name as you normally would. When it asks @string.Join(", ", mock.Hosts) the same thing it asked during the recording,
+                                            RepoRunner answers with what was said then, so nothing is saved, approved or emailed for real.
+                                            Anything the recording does not hold @(mock.PassThrough ? "is passed on to the real service" : "is refused").
+                                        </div>
+                                        <div class="facts">
+                                            <span class="fact">Answered from the recording <b>@fromRecording</b></span>
+                                            <span class="fact">Sent to the real service <b class="@(real.Count > 0 ? "warn-text" : "")">@real.Count</b></span>
+                                            @if (failed.Count > 0)
+                                            {
+                                                <span class="fact">Failed <b class="bad-text">@failed.Count</b></span>
+                                            }
+                                            <label class="check"><input type="checkbox" checked="@(!mock.PassThrough)" @onchange="e => mock.PassThrough = !(bool)e.Value!" /> Refuse calls that are not in the recording</label>
+                                        </div>
+                                        @if (real.Count > 0)
                                         {
-                                            <div class="mono miss">@miss.Method @miss.PathAndQuery</div>
+                                            <details class="more">
+                                                <summary>What went to the real service (@real.Count)</summary>
+                                                @foreach (var group in real.GroupBy(h => h.Method + " " + h.Label).Take(40))
+                                                {
+                                                    <div class="mono miss">@group.Key@(group.Count() > 1 ? $"  ×{group.Count()}" : "")</div>
+                                                }
+                                            </details>
+                                        }
+                                        @foreach (var miss in failed.DistinctBy(h => h.Method + h.Label).Take(6))
+                                        {
+                                            <div class="mono miss">@miss.Status @miss.Method @miss.Label</div>
                                         }
                                     </div>
                                 </div>
