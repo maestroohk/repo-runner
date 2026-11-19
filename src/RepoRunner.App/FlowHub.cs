@@ -78,6 +78,8 @@ public sealed class Flow
 {
     public required string TraceId { get; init; }
     public DateTime FirstSeen { get; init; } = DateTime.UtcNow;
+    /// <summary>When the last event for this flow arrived. Not saved: it only says whether a live flow has gone quiet.</summary>
+    [JsonIgnore] public DateTime LastEvent { get; set; } = DateTime.UtcNow;
     public Dictionary<string, FlowStep> Steps { get; } = [];
     public List<FlowNote> Notes { get; } = [];
     public List<FlowError> Errors { get; } = [];
@@ -214,6 +216,7 @@ public sealed partial class FlowHub : IDisposable
                     _flows.Remove(_flows.Values.OrderBy(f => f.FirstSeen).First().TraceId);
                 _flows[traceId] = flow = new Flow { TraceId = traceId };
             }
+            flow.LastEvent = DateTime.UtcNow;
 
             switch (type)
             {

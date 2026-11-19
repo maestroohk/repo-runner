@@ -8,7 +8,11 @@ using RepoRunner.Core;
 namespace RepoRunner.App;
 
 /// <summary>A business process as it was once performed: every step, call, payload and exception, in order.</summary>
-public sealed record SavedProcess(string Id, string Name, string Env, DateTime Created, List<Flow> Flows);
+/// <param name="Kind">recording (saved by someone) | failure (kept automatically when a step failed)</param>
+public sealed record SavedProcess(string Id, string Name, string Env, DateTime Created, List<Flow> Flows, string Kind = "recording", string? Reason = null)
+{
+    public bool IsFailure => Kind == "failure";
+}
 
 /// <summary>
 /// Keeps recorded processes beside the vault. They hold real request and response data, so each file is
@@ -26,14 +30,20 @@ public sealed class ProcessStore(VaultService vaults)
 
     private string Folder(RepoInfo repo) => vaults.Use(v => v.RecordingsFolder(repo));
 
-    public SavedProcess Save(RepoInfo repo, string name, string env, List<Flow> flows)
+    public SavedProcess Save(RepoInfo repo, string name, string env, List<Flow> flows, string kind = "recording", string? reason = null)
     {
-        var process = new SavedProcess(Guid.NewGuid().ToString("N"), name, env, DateTime.Now, flows);
+        var process = new SavedProcess(Guid.NewGuid().ToString("N"), name, env, DateTime.Now, flows, kind, reason);
         var sealedBytes = vaults.Use(v => v.Protect(JsonSerializer.SerializeToUtf8Bytes(process, Json), Purpose));
         Directory.CreateDirectory(Folder(repo));
         File.WriteAllBytes(Path.Combine(Folder(repo), process.Id + ".rrp"), sealedBytes);
-        vaults.Use(v => v.Audit("process-save", repo.Name, env, name));
+        vaults.Use(v => v.Audit(kind == "failure" ? "failure-kept" : "process-save", repo.Name, env, name));
         return process;
+    }
+
+    /// <summary>Deletes the oldest records of one kind beyond the newest <paramref name="keep"/>. Other kinds are untouched.</summary>
+    public void Prune(RepoInfo repo, string kind, int keep)
+    {
+        foreach (var old in List(repo).Where(p => p.Kind == kind).Skip(keep)) Delete(repo, old);
     }
 
     public List<SavedProcess> List(RepoInfo repo)

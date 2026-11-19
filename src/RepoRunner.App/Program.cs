@@ -29,6 +29,7 @@ builder.Services.AddSingleton<VaultService>();
 builder.Services.AddSingleton<SessionManager>();
 builder.Services.AddSingleton<ProcessStore>();
 builder.Services.AddSingleton<Resender>();
+builder.Services.AddSingleton<FailureKeeper>();
 
 var app = builder.Build();
 var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
@@ -73,6 +74,7 @@ app.Lifetime.ApplicationStopping.Register(() =>
 });
 
 await app.StartAsync();
+app.Services.GetRequiredService<FailureKeeper>(); // starts watching
 var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
 var url = $"{address}/?token={token}";
 

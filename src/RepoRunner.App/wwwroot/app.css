@@ -428,6 +428,15 @@ button.frame:hover { background: var(--surface-3); color: var(--text); }
 .proc-chip { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); color: var(--text-2); font-size: 13px; }
 .proc-chip:hover { border-color: var(--border-strong); color: var(--text); }
 .proc-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.kept { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.kept-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.kept-head .needs-title { width: auto; }
+.kept-list { display: flex; flex-direction: column; gap: 2px; max-height: 210px; overflow-y: auto; }
+.kept-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; border: 1px solid transparent; border-radius: 8px; background: none; text-align: left; color: var(--danger); }
+.kept-item:hover { background: var(--surface-3); }
+.kept-item.active { border-color: color-mix(in srgb, var(--danger) 55%, transparent); background: var(--danger-soft); }
+.kept-reason { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12.5px var(--mono); color: var(--text); }
+.kept-item .flow-meta { flex: none; }
 .proc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .callout.calm { background: var(--ok-soft); }
 .callout.calm .icon { color: var(--ok); }

@@ -5,6 +5,7 @@
 @inject SessionManager Sessions
 @inject ProcessStore Recordings
 @inject Resender Sender
+@inject FailureKeeper Keeper
 @inject IHostApplicationLifetime Lifetime
 @inject IJSRuntime JS
 
@@ -230,6 +231,10 @@
                             @if (recordingSince is not null)
                             {
                                 <span class="rec-dot on"></span>
+                            }
+                            else if (saved.Count(p => p.IsFailure) is > 0 and var keptFailures)
+                            {
+                                <span class="tab-count bad" title="Failures kept automatically">@keptFailures</span>
                             }
                             else if (saved.Count > 0)
                             {
@@ -706,13 +711,39 @@
                                     }
                                     <b>Current run</b>
                                 </button>
-                                @foreach (var process in saved)
+                                @foreach (var process in saved.Where(p => !p.IsFailure))
                                 {
                                     <button class="proc-chip @(opened?.Id == process.Id ? "active" : "")" @onclick="() => OpenProcess(process.Id)">
                                         <Icon Name="layers" Size="14" />
                                         <b>@process.Name</b>
                                         <span class="flow-meta">@process.Created.ToString("d MMM HH:mm")</span>
                                     </button>
+                                }
+                            </div>
+
+                            <div class="kept">
+                                <div class="kept-head">
+                                    <span class="needs-title">Kept failures</span>
+                                    <span class="flow-meta">
+                                        @(Keeper.Enabled
+                                            ? "While an app runs here, any step that fails is kept with the steps that led to it. No need to press Record."
+                                            : "Off: failures are not being kept.")
+                                    </span>
+                                    <span class="spacer"></span>
+                                    <label class="check"><input type="checkbox" checked="@Keeper.Enabled" @onchange="e => Keeper.Enabled = (bool)e.Value!" /> Keep failures automatically</label>
+                                </div>
+                                @if (saved.Any(p => p.IsFailure))
+                                {
+                                    <div class="kept-list">
+                                        @foreach (var failure in saved.Where(p => p.IsFailure))
+                                        {
+                                            <button class="kept-item @(opened?.Id == failure.Id ? "active" : "")" @onclick="() => OpenProcess(failure.Id)">
+                                                <Icon Name="alert" Size="14" />
+                                                <span class="kept-reason">@(failure.Reason ?? failure.Name)</span>
+                                                <span class="flow-meta">@failure.Created.ToString("d MMM HH:mm:ss") · @failure.Env</span>
+                                            </button>
+                                        }
+                                    </div>
                                 }
                             </div>
 
@@ -769,9 +800,27 @@
                             else
                             {
                                 var problemSteps = steps.Count(s => s.HasProblem);
+                                @if (opened is { IsFailure: true })
+                                {
+                                    <div class="callout">
+                                        <Icon Name="alert" />
+                                        <div>
+                                            <b>Kept automatically: @opened.Reason.</b>
+                                            <div class="flow-meta">
+                                                Happened at @((opened.Flows.LastOrDefault()?.FirstSeen ?? opened.Created.ToUniversalTime()).ToLocalTime().ToString("HH:mm:ss")) on @opened.Env. The failing step is the last one below@(steps.Count switch
+                                                {
+                                                    <= 1 => ".",
+                                                    2 => "; the step before it is what led there.",
+                                                    _ => $"; the {steps.Count - 1} before it are what led there.",
+                                                })
+                                                Open a call to re-send it once you have a fix.
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
                                 <div class="overview">
                                     <div class="ov-top">
-                                        <h3>@(opened?.Name ?? "Current run")</h3>
+                                        <h3>@(opened is { IsFailure: true } ? "Failure" : opened?.Name ?? "Current run")</h3>
                                         <span class="fact"><b>@steps.Count</b> steps@(steps.Sum(s => s.Count) > steps.Count ? $" ({steps.Sum(s => s.Count)} with repeats merged)" : "")</span>
                                         <span class="fact"><b>@allCalls.Count</b> calls</span>
                                         <span class="fact">Problems in <b class="@(problemSteps > 0 ? "bad-text" : "")">@problemSteps</b> steps</span>
@@ -1452,6 +1501,7 @@
         // Output and elapsed times change without any click; refresh twice a second while something is happening.
         timer = new Timer(_ =>
         {
+            if (Keeper.Version != seenKept) InvokeAsync(() => { NoticeKept(); StateHasChanged(); });
             var version = Sessions.Version;
             if (version == seenVersion && !sessions.Any(s => s.Running) && unlocked.Count == 0 && message is null) return;
             seenVersion = version;
@@ -1644,26 +1694,11 @@
 
     private List<Flow> FlowList => AllFlows;
 
-    private static bool IsRequest(Flow flow) => flow.Root?.Category == "request";
+    private static bool IsRequest(Flow flow) => FlowRules.IsRequest(flow);
 
-    private const string BlazorHub = "Microsoft.AspNetCore.Components.Server.ComponentHub/";
+    private const string BlazorHub = FlowRules.BlazorHub;
 
-    private static readonly string[] AssetEndings =
-        [".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".wasm", ".json"];
-
-    /// <summary>
-    /// Traffic that is plumbing rather than a feature: Blazor's circuit bookkeeping and connection requests, and
-    /// static files. Anything that failed or threw is never treated as plumbing.
-    /// </summary>
-    private static bool IsChatter(Flow flow)
-    {
-        if (flow.Errors.Count > 0 || flow.Notes.Count > 0 || flow.Root is not { } root) return false;
-        if (flow.Steps.Count == 1 && (root.Name.StartsWith(BlazorHub) || root.Name.StartsWith("Circuit "))) return true;
-        if (root.Category != "request" || root.StatusCode >= 400 || flow.Steps.Values.Any(s => s.Failed)) return false;
-        var path = root.Tag("url.path", "http.target") ?? "";
-        return path.StartsWith("/_blazor") || path.StartsWith("/_framework") || path.StartsWith("/_content")
-            || AssetEndings.Any(ending => path.EndsWith(ending, StringComparison.OrdinalIgnoreCase));
-    }
+    private static bool IsChatter(Flow flow) => FlowRules.IsChatter(flow);
 
     private List<Flow> FlowsInView()
     {
@@ -2015,9 +2050,24 @@
     private static string Size(string? text) => text is null ? "" : text.Length < 1024 ? $"{text.Length} B" : $"{text.Length / 1024.0:0.#} KB";
 
     /// <summary>A step someone took: a page request, a click, a navigation. Everything else is background.</summary>
-    private static bool IsStage(Flow flow) =>
-        IsRequest(flow) || (flow.Root is { } root && (root.Name.StartsWith("Event ") || root.Name.StartsWith("Route ")
-            || (root.Name.StartsWith(BlazorHub) && flow.Steps.Count > 1)));
+    private static bool IsStage(Flow flow) => FlowRules.IsStage(flow);
+
+    private long seenKept = -1;
+
+    /// <summary>Picks up failures kept since the page last looked, and says so when they belong to this repo.</summary>
+    private void NoticeKept()
+    {
+        var version = Keeper.Version;
+        if (version == seenKept) return;
+        var first = seenKept < 0;
+        seenKept = version;
+        if (first || repo is null) return;
+        savedRepoId = -1;
+        var open = procId;
+        LoadSaved();
+        procId = open;
+        if (Keeper.Last is { } last && last.Repo == repo.Name) Say($"Kept a failure: {last.Reason}.", error: true);
+    }
 
     private void LoadSaved()
     {
