@@ -2161,6 +2161,12 @@
         }
     }
 
+    private static readonly HashSet<string> PassiveEvents = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "POINTERENTER", "POINTERLEAVE", "POINTERUP", "POINTERDOWN", "POINTERMOVE", "MOUSEOVER", "MOUSEOUT", "MOUSEENTER", "MOUSELEAVE",
+        "MOUSEDOWN", "MOUSEUP", "FOCUS", "BLUR", "FOCUSIN", "FOCUSOUT", "KEYDOWN", "KEYUP", "KEYPRESS", "SCROLL", "TOUCHSTART", "TOUCHEND",
+    };
+
     private string procFilter = "";
     private string? procSystem;
     private bool procProblemsOnly;
@@ -2305,6 +2311,9 @@
                     names.GetValueOrDefault(key) ?? key.Split(':')[0], key, step.Failed && !empty, soft && !step.Failed, empty,
                     SentSummary(body?.Request), empty ? "nothing found (404)" : returned, empty ? 0 : rowCount));
             }
+
+            // Hovering, focusing and key presses are not things the user set out to do; skip them unless they caused something.
+            if (calls.Count == 0 && flow.Errors.Count == 0 && verb is not null && PassiveEvents.Contains(verb)) continue;
 
             // Typing in a field fires one event per keystroke: show the run once.
             if (calls.Count == 0 && flow.Errors.Count == 0 && steps.Count > 0 && steps[^1] is { Calls.Count: 0 } previous
