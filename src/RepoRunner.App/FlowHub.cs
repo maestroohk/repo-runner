@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace RepoRunner.App;
@@ -19,9 +20,11 @@ public sealed class FlowStep
     public int Depth { get; set; }
 
     public string? Tag(params string[] names) => names.Select(n => Tags.GetValueOrDefault(n)).FirstOrDefault(v => v is not null);
+    [JsonIgnore]
     public int? StatusCode => int.TryParse(Tag("http.response.status_code", "http.status_code"), out var code) ? code : null;
 
     /// <summary>request | http | db | step</summary>
+    [JsonIgnore]
     public string Category =>
         // Only real HTTP requests count; a Blazor circuit message is also "Server" kind but has no method.
         Kind == "Server" && Tag("http.request.method", "http.method") is not null ? "request"
@@ -29,6 +32,7 @@ public sealed class FlowStep
         : Tag("url.full", "http.url") is not null ? "http"
         : "step";
 
+    [JsonIgnore]
     public string Title => Category switch
     {
         "request" => $"{Tag("http.request.method", "http.method")} {Tag("url.path", "http.target", "http.route") ?? Name}".Trim(),
@@ -37,7 +41,17 @@ public sealed class FlowStep
         _ => Name,
     };
 
+    [JsonIgnore]
     public bool Failed => Status == "Error" || StatusCode >= 500 || (Category == "http" && StatusCode >= 400);
+}
+
+/// <summary>What was sent and what came back on one call, as text.</summary>
+public sealed class FlowBody
+{
+    public string? RequestType { get; set; }
+    public string? Request { get; set; }
+    public string? ResponseType { get; set; }
+    public string? Response { get; set; }
 }
 
 public sealed record FlowNote(DateTime At, string? SpanId, string Label, string? Title, string Body);
@@ -53,6 +67,7 @@ public sealed class FlowError
     public bool Unhandled { get; set; }
     public long Key { get; init; }
     public List<FlowFrame> Frames { get; init; } = [];
+    [JsonIgnore]
     public FlowFrame? Origin => Frames.FirstOrDefault(f => f.File is not null);
 }
 
@@ -67,21 +82,30 @@ public sealed class Flow
     /// <summary>For a step, the app's own methods that led to it, innermost first.</summary>
     public Dictionary<string, List<FlowFrame>> Stacks { get; } = [];
 
+    /// <summary>For a call, the request and response bodies that were captured.</summary>
+    public Dictionary<string, FlowBody> Bodies { get; } = [];
+
     /// <summary>Every source file this flow is known to have run code from.</summary>
+    [JsonIgnore]
     public IEnumerable<FlowFrame> KnownFrames =>
         Stacks.Values.SelectMany(f => f).Concat(Errors.SelectMany(e => e.Frames)).Where(f => f.File is not null);
 
+    [JsonIgnore]
     public FlowStep? Root => Steps.Values.Where(s => s.ParentId is null || !Steps.ContainsKey(s.ParentId)).OrderBy(s => s.Start).FirstOrDefault();
 
+    [JsonIgnore]
     public string Title =>
         Root is { } root ? (root.Title.Length > 0 ? root.Title : root.Name)
         : Errors.Count > 0 ? Errors[0].Type.Split('.').Last()
         : "Activity outside a request";
 
+    [JsonIgnore]
     public double Ms => Root?.Ms ?? 0;
+    [JsonIgnore]
     public int? StatusCode => Root?.StatusCode;
 
     /// <summary>failed | warn | ok</summary>
+    [JsonIgnore]
     public string Outcome =>
         Errors.Any(e => e.Unhandled) || Steps.Values.Any(s => s.Failed) ? "failed"
         : Errors.Count > 0 || StatusCode >= 400 ? "warn"
@@ -211,6 +235,16 @@ public sealed partial class FlowHub : IDisposable
                             if (tag.Value.ValueKind == JsonValueKind.String) step.Tags[tag.Name] = Mask(tag.Value.GetString()!);
                     break;
                 }
+                case "body":
+                    if (Text("id") is { } callId && e.TryGetProperty("text", out var captured))
+                    {
+                        if (!flow.Bodies.TryGetValue(callId, out var body)) flow.Bodies[callId] = body = new FlowBody();
+                        // Stored as received: a replay has to hand the app exactly what the service sent.
+                        // Masking happens when a body is shown.
+                        if (Text("side") == "request") (body.RequestType, body.Request) = (Text("contentType"), captured.GetString());
+                        else (body.ResponseType, body.Response) = (Text("contentType"), captured.GetString());
+                    }
+                    break;
                 case "stack":
                     if (Text("id") is { } stepId && e.TryGetProperty("frames", out var calling))
                         flow.Stacks[stepId] = ReadFrames(calling);
@@ -256,8 +290,11 @@ public sealed partial class FlowHub : IDisposable
         return text;
     }
 
+    /// <summary>A captured body as it may be shown: vault secrets and secret-named fields blanked.</summary>
+    public string Show(string text) => Redact(Mask(text));
+
     /// <summary>Captured objects can hold what a user typed; blank the fields that are secret by name.</summary>
-    private static string Redact(string json) => SensitiveField().Replace(json, m => $"{m.Groups[1].Value}\"••••\"");
+    public static string Redact(string json) => SensitiveField().Replace(json, m => $"{m.Groups[1].Value}\"••••\"");
 
     [GeneratedRegex(@"(""[^""]*(?:password|passwd|pwd|pin|secret|token|otp|apikey|api_key|authorization)[^""]*""\s*:\s*)""(?:[^""\\]|\\.)*""", RegexOptions.IgnoreCase)]
     private static partial Regex SensitiveField();

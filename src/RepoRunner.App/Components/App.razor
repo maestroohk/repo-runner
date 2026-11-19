@@ -15,7 +15,8 @@
 <body>
     <Routes @rendermode="InteractiveServer" />
     <ReconnectModal />
-    <script>window.rrScrollEnd = el => { if (el) el.scrollTop = el.scrollHeight; };</script>
+    <script>window.rrScrollEnd = el => { if (el) el.scrollTop = el.scrollHeight; };
+        window.rrCopy = text => navigator.clipboard.writeText(text);</script>
     <script src="@Assets["_framework/blazor.web.js"]"></script>
 </body>
 

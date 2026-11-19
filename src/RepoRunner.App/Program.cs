@@ -27,6 +27,7 @@ builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddSingleton<VaultService>();
 builder.Services.AddSingleton<SessionManager>();
+builder.Services.AddSingleton<ProcessStore>();
 
 var app = builder.Build();
 var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));

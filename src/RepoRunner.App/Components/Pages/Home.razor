@@ -3,12 +3,13 @@
 @implements IDisposable
 @inject VaultService Vaults
 @inject SessionManager Sessions
+@inject ProcessStore Recordings
 @inject IHostApplicationLifetime Lifetime
 @inject IJSRuntime JS
 
 <PageTitle>RepoRunner</PageTitle>
 
-<div class="app @(Focused ? "focus" : "")">
+<div class="rr-app @(Focused ? "focus" : "")">
     <aside class="sidebar">
         <div class="brand"><span class="logo"><Icon Name="play" Size="12" /></span>RepoRunner</div>
 
@@ -102,7 +103,8 @@
                         }
                         <span class="spacer"></span>
                         <div class="seg">
-                            <button class="seg-opt @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">Flow map</button>
+                            <button class="seg-opt @(tab == "processes" ? "active" : "")" @onclick="@(() => tab = "processes")">Processes</button>
+                            <button class="seg-opt @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">Live map</button>
                             <button class="seg-opt @(tab == "features" ? "active" : "")" @onclick="@(() => tab = "features")">Features and code paths</button>
                         </div>
                     </div>
@@ -222,8 +224,19 @@
                                 <span class="pulse"></span>
                             }
                         </button>
+                        <button class="ptab @(tab == "processes" ? "active" : "")" @onclick="@(() => tab = "processes")">
+                            <Icon Name="layers" /> Processes
+                            @if (recordingSince is not null)
+                            {
+                                <span class="rec-dot on"></span>
+                            }
+                            else if (saved.Count > 0)
+                            {
+                                <span class="tab-count">@saved.Count</span>
+                            }
+                        </button>
                         <button class="ptab @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">
-                            <Icon Name="flow" /> Flow
+                            <Icon Name="flow" /> Live map
                             @if (AllFlows.Count(f => f.Outcome == "failed") is > 0 and var failedFlows)
                             {
                                 <span class="tab-count bad">@failedFlows</span>
@@ -234,7 +247,7 @@
                             }
                         </button>
                         <button class="ptab @(tab == "features" ? "active" : "")" @onclick="@(() => tab = "features")">
-                            <Icon Name="layers" /> Features
+                            <Icon Name="code" /> Features
                             @if (scan is not null)
                             {
                                 <span class="tab-count">@scan.Features.Count</span>
@@ -457,6 +470,10 @@
                                                                         <pre>@Pretty(note.Body)</pre>
                                                                     </div>
                                                                 }
+                                                                @if (ev.Step is not null && picked.Bodies.TryGetValue(ev.Step.Id, out var hopData))
+                                                                {
+                                                                    @BodyCards(hopData)
+                                                                }
                                                                 @if (ev.Frames is { Count: > 0 })
                                                                 {
                                                                     <div class="capture">
@@ -642,6 +659,247 @@
                                                     </button>
                                                 }
                                             </div>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                        }
+                        else if (tab == "processes")
+                        {
+                            var canRecord = flowSession is { Flows: not null };
+                            var opened = saved.FirstOrDefault(p => p.Id == procId);
+                            var viewFlows = ProcessFlows(opened);
+                            var lanes = LanesOf(viewFlows);
+                            var rows = SequenceRows(viewFlows, lanes);
+                            var seqPicked = seqFlow is null ? null : viewFlows.FirstOrDefault(f => f.TraceId == seqFlow);
+                            var replay = RepoSessions.LastOrDefault(s => s.Running && s.Mock is not null);
+
+                            <div class="proc-bar">
+                                @if (recordingSince is not null)
+                                {
+                                    <span class="rec"><span class="rec-dot on"></span> Recording “@recordingName”</span>
+                                    <span class="flow-meta">@rows.Count(r => r.Kind == "stage") steps so far. Go through the process in the app, then stop.</span>
+                                    <span class="spacer"></span>
+                                    <button class="btn primary small" @onclick="StopRecording"><Icon Name="stop" Size="11" /> Stop and save</button>
+                                    <button class="btn small" @onclick="() => recordingSince = null">Discard</button>
+                                }
+                                else
+                                {
+                                    <input class="input proc-name" placeholder="Name the process, e.g. Non-NIN registration" @bind="procName" @bind:event="oninput" />
+                                    <button class="btn small rec-btn" disabled="@(flowSession is not { Flows: not null, Running: true })"
+                                            title="Start recording, then go through the process in the app" @onclick="StartRecording">
+                                        <span class="rec-dot"></span> Record
+                                    </button>
+                                    <button class="btn small" disabled="@(!canRecord)" title="Save everything captured since the app started as one process" @onclick="SaveCaptured">
+                                        Save what was captured
+                                    </button>
+                                }
+                            </div>
+
+                            <div class="proc-list">
+                                <button class="proc-chip @(opened is null ? "active" : "")" @onclick="() => OpenProcess(null)">
+                                    @if (flowSession is { Running: true })
+                                    {
+                                        <span class="pulse"></span>
+                                    }
+                                    <b>Current run</b>
+                                </button>
+                                @foreach (var process in saved)
+                                {
+                                    <button class="proc-chip @(opened?.Id == process.Id ? "active" : "")" @onclick="() => OpenProcess(process.Id)">
+                                        <Icon Name="layers" Size="14" />
+                                        <b>@process.Name</b>
+                                        <span class="flow-meta">@process.Created.ToString("d MMM HH:mm") · @process.Flows.Count steps</span>
+                                    </button>
+                                }
+                            </div>
+
+                            @if (opened is not null)
+                            {
+                                var recordedCalls = opened.Flows.Sum(f => f.Steps.Values.Count(s => s.Category == "http"));
+                                var withResponse = opened.Flows.Sum(f => f.Bodies.Values.Count(b => b.Response is not null));
+                                <div class="proc-actions">
+                                    <span class="flow-meta">Recorded on @opened.Env · @recordedCalls calls to other services, @withResponse with the response saved</span>
+                                    <span class="spacer"></span>
+                                    <button class="btn primary small" title="Start the app with its services replaced by this recording's responses" @onclick="() => RunAgainst(opened)">
+                                        <Icon Name="play" Size="11" /> Run the app against this recording
+                                    </button>
+                                    <button class="btn small @(confirmKey == "proc:" + opened.Id ? "confirm" : "")" @onclick="@(() => Confirm("proc:" + opened.Id, () => DeleteProcess(opened)))">
+                                        <Icon Name="trash" Size="13" /> @(confirmKey == "proc:" + opened.Id ? "Click again to delete" : "Delete")
+                                    </button>
+                                </div>
+                            }
+
+                            @if (replay?.Mock is { } mock)
+                            {
+                                var hits = mock.Hits();
+                                var unmatched = hits.Where(h => !h.Matched).ToList();
+                                <div class="callout @(unmatched.Count > 0 ? "" : "calm")">
+                                    <Icon Name="@(unmatched.Count > 0 ? "alert" : "check")" />
+                                    <div>
+                                        <b>Replaying “@mock.ProcessName”.</b>
+                                        The app's calls to @string.Join(", ", mock.Hosts) are answered from the recording, not the real services.
+                                        @hits.Count(h => h.Matched) answered so far@(unmatched.Count > 0 ? $"; {unmatched.Count} were not in the recording — this is where this run departs from the recorded one:" : ".")
+                                        @foreach (var miss in unmatched.DistinctBy(h => h.Method + h.PathAndQuery).Take(6))
+                                        {
+                                            <div class="mono miss">@miss.Method @miss.PathAndQuery</div>
+                                        }
+                                    </div>
+                                </div>
+                            }
+
+                            @if (rows.Count == 0)
+                            {
+                                <div class="state">
+                                    <span class="glyph"><Icon Name="layers" Size="22" /></span>
+                                    <h3>@(canRecord ? "Nothing to show yet" : "Record a process to see it end to end")</h3>
+                                    <p>Run the app, press Record, and go through a process such as a registration. RepoRunner keeps every step, every call to another system, and the data sent and returned, and lays it out across the systems involved. A saved process can be reopened later, or used to run the app without the real services.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="stage">
+                                    <div class="seq">
+                                        <div class="seq-head" style="grid-template-columns: repeat(@lanes.Count, minmax(0, 1fr))">
+                                            @foreach (var lane in lanes)
+                                            {
+                                                <div class="seq-lane @lane.Kind" title="@lane.Key">
+                                                    <span class="device-icon @lane.Kind"><Icon Name="@lane.Icon" Size="15" /></span>
+                                                    <span class="seq-lane-name">@lane.Name</span>
+                                                </div>
+                                            }
+                                        </div>
+                                        <div class="seq-body">
+                                            @for (var i = 0; i < lanes.Count; i++)
+                                            {
+                                                <i class="seq-guide" style="left:@Pct((i + 0.5) / lanes.Count)"></i>
+                                            }
+                                            @foreach (var row in rows)
+                                            {
+                                                var isPicked = seqFlow == row.Flow.TraceId && seqStep == row.StepId && seqError == row.Error?.Key && row.Kind != "stage";
+                                                @if (row.Kind == "stage")
+                                                {
+                                                    <div class="seq-stage @row.Flow.Outcome">
+                                                        <span class="event-n">@row.Number</span>
+                                                        @if (row.Verb is not null)
+                                                        {
+                                                            <span class="verb v-@row.Verb.ToLowerInvariant()">@row.Verb</span>
+                                                        }
+                                                        <span class="seq-stage-title">@row.Label</span>
+                                                        <span class="flow-meta">@row.Meta</span>
+                                                    </div>
+                                                }
+                                                else if (row.From == row.To)
+                                                {
+                                                    <button class="seq-row @(isPicked ? "picked" : "")" @onclick="() => PickSeq(row)">
+                                                        <span class="seq-mark @(row.Failed ? "failed" : "")" style="left:@Pct((row.From + 0.5) / lanes.Count)">
+                                                            <Icon Name="alert" Size="12" /> @row.Label
+                                                        </span>
+                                                    </button>
+                                                }
+                                                else
+                                                {
+                                                    <button class="seq-row @(isPicked ? "picked" : "")" @onclick="() => PickSeq(row)">
+                                                        <span class="seq-arrow @(row.To > row.From ? "right" : "left") @(row.Failed ? "failed" : "") @row.Kind"
+                                                              style="left:@Pct((Math.Min(row.From, row.To) + 0.5) / lanes.Count);width:@Pct(Math.Abs(row.To - row.From) / (double)lanes.Count)">
+                                                            <span class="seq-label">
+                                                                @if (row.Verb is not null && row.Kind == "call")
+                                                                {
+                                                                    <span class="verb v-@row.Verb.ToLowerInvariant()">@row.Verb</span>
+                                                                }
+                                                                <span class="seq-text">@row.Label</span>
+                                                            </span>
+                                                            <span class="seq-line"></span>
+                                                            <span class="seq-meta">@row.Meta</span>
+                                                        </span>
+                                                    </button>
+                                                }
+                                            }
+                                        </div>
+                                    </div>
+
+                                    <div class="inspector">
+                                        @if (seqPicked is null)
+                                        {
+                                            <div class="needs">
+                                                <div class="needs-title">How to read this</div>
+                                                <div class="flow-meta">Each column is a system. Each numbered row is something you did; the arrows under it are the calls it caused, in order, with the size of what was sent and returned. Click an arrow to see the data itself.</div>
+                                            </div>
+                                            <label class="check"><input type="checkbox" @bind="showBackground" /> Include background activity and stray exceptions</label>
+                                        }
+                                        else
+                                        {
+                                            var step = seqStep is null ? null : seqPicked.Steps.GetValueOrDefault(seqStep);
+                                            var error = seqError is null ? null : seqPicked.Errors.FirstOrDefault(x => x.Key == seqError);
+                                            var (verb, label, host) = step is null ? Describe(seqPicked) : Describe(step);
+                                            <div class="insp-head">
+                                                <button class="icon-btn" title="Close" @onclick="() => { seqFlow = null; seqStep = null; seqError = null; }"><Icon Name="back" /></button>
+                                                @if (verb is not null)
+                                                {
+                                                    <span class="verb v-@verb.ToLowerInvariant()">@verb</span>
+                                                }
+                                                <h3 title="@label">@(error is not null ? error.Type.Split('.').Last() : label)</h3>
+                                            </div>
+                                            @if (error is not null)
+                                            {
+                                                @ErrorCard(error)
+                                            }
+                                            else if (step is not null)
+                                            {
+                                                <div class="facts">
+                                                    @if (step.StatusCode is { } httpCode)
+                                                    {
+                                                        <span class="badge @(httpCode >= 400 ? "bad" : "ok")">@httpCode</span>
+                                                    }
+                                                    <span class="fact">Took <b>@step.Ms.ToString("0") ms</b></span>
+                                                    @if (host is not null)
+                                                    {
+                                                        <span class="fact">To <b>@host</b></span>
+                                                    }
+                                                </div>
+                                                @if (seqPicked.Bodies.TryGetValue(step.Id, out var payload))
+                                                {
+                                                    @BodyCards(payload)
+                                                }
+                                                else
+                                                {
+                                                    <div class="flow-meta">No body was captured for this call: it had none, or it was binary or a stream.</div>
+                                                }
+                                                @if (seqPicked.Stacks.TryGetValue(step.Id, out var chain) && chain.Count > 0)
+                                                {
+                                                    <div class="capture">
+                                                        <div class="capture-head"><Icon Name="code" Size="13" /> Made by your code</div>
+                                                        <div class="callers">
+                                                            @foreach (var frame in chain.Take(12))
+                                                            {
+                                                                <button class="frame" title="Open in Rider" @onclick="() => OpenFrame(frame)">
+                                                                    <span class="frame-name">@ShortMethod(frame.Method)</span>
+                                                                    <span class="mono frame-at">@System.IO.Path.GetFileName(frame.File):@frame.Line</span>
+                                                                </button>
+                                                            }
+                                                        </div>
+                                                    </div>
+                                                }
+                                            }
+                                            else
+                                            {
+                                                <div class="facts">
+                                                    <span class="badge @(seqPicked.Outcome == "failed" ? "bad" : seqPicked.Outcome == "warn" ? "warn" : "ok")">@(seqPicked.Outcome == "failed" ? "Failed" : seqPicked.Outcome == "warn" ? "Exceptions" : "Clean")</span>
+                                                    <span class="fact">Took <b>@seqPicked.Ms.ToString("0") ms</b></span>
+                                                    <span class="fact">Calls <b>@seqPicked.Steps.Values.Count(s => s.Category is "http" or "db")</b></span>
+                                                </div>
+                                                @foreach (var note in seqPicked.Notes)
+                                                {
+                                                    <div class="capture">
+                                                        <div class="capture-head"><Icon Name="box" Size="13" /> @note.Label</div>
+                                                        <pre>@Pretty(note.Body)</pre>
+                                                    </div>
+                                                }
+                                                @foreach (var thrown in seqPicked.Errors)
+                                                {
+                                                    @ErrorCard(thrown)
+                                                }
+                                            }
                                         }
                                     </div>
                                 </div>
@@ -1144,6 +1402,7 @@
         if (repo is null) return;
 
         EnsureScan();
+        LoadSaved();
         if (!envs.Any(e => e.Name == envName)) envName = envs[0].Name;
         var current = repo;
         var env = CurrentEnv;
@@ -1340,7 +1599,17 @@
         }
         if (name.StartsWith("Route ") && name[6..].Split(" -> ", 2) is [var route, _]) return ("NAV", route, null);
         if (name.StartsWith("Circuit ")) return (null, "Blazor circuit opened", null);
-        return (null, name.StartsWith(BlazorHub) ? "Blazor · " + name[BlazorHub.Length..] : name, null);
+        if (name.StartsWith(BlazorHub))
+            return ("UI", name[BlazorHub.Length..] switch
+            {
+                "UpdateRootComponents" or "StartCircuit" => "page renders",
+                "OnRenderCompleted" => "after render",
+                "BeginInvokeDotNetFromJS" => "browser calls into the page",
+                "EndInvokeJSFromDotNet" => "browser replies to the page",
+                "OnLocationChanged" => "address changes",
+                var other => other,
+            }, null);
+        return (null, name, null);
     }
 
     private static (string? Verb, string Label, string? Host) Describe(Flow flow) =>
@@ -1632,6 +1901,279 @@
         selectedNode = null;
         featureOfFlow.Clear();
     }
+
+    // ---------- processes: record, view across systems, replay ----------
+
+    private sealed record SeqLane(string Key, string Kind, string Name, string Icon);
+
+    /// <summary>One line of the sequence: a step heading, a message between two systems, or something inside one.</summary>
+    private sealed record SeqRow(string Kind, Flow Flow, string? StepId, FlowError? Error, int From, int To, string? Verb, string Label,
+        string Meta, bool Failed, int Number);
+
+    private List<SavedProcess> saved = [];
+    private long savedRepoId = -1;
+    private string? procId;
+    private string procName = "";
+    private DateTime? recordingSince;
+    private string recordingName = "";
+    private string? seqFlow, seqStep;
+    private long? seqError;
+    private bool showBackground;
+
+    private static string Pct(double fraction) => (fraction * 100).ToString("0.###", Plain) + "%";
+
+    private static string Size(string? text) => text is null ? "" : text.Length < 1024 ? $"{text.Length} B" : $"{text.Length / 1024.0:0.#} KB";
+
+    /// <summary>A step someone took: a page request, a click, a navigation. Everything else is background.</summary>
+    private static bool IsStage(Flow flow) =>
+        IsRequest(flow) || (flow.Root is { } root && (root.Name.StartsWith("Event ") || root.Name.StartsWith("Route ")
+            || (root.Name.StartsWith(BlazorHub) && flow.Steps.Count > 1)));
+
+    private void LoadSaved()
+    {
+        if (repo is null || repo.Id == savedRepoId) return;
+        savedRepoId = repo.Id;
+        var current = repo;
+        try { saved = Recordings.List(current); }
+        catch (VaultException) { saved = []; }
+        procId = null;
+    }
+
+    /// <summary>The flows on show: a saved process, or the current run (from the moment recording began, while recording).</summary>
+    private List<Flow> ProcessFlows(SavedProcess? opened)
+    {
+        IEnumerable<Flow> flows = opened?.Flows
+            ?? AllFlows.Where(f => !IsChatter(f) && (recordingSince is null || f.FirstSeen >= recordingSince));
+        if (!showBackground) flows = flows.Where(IsStage);
+        var ordered = flows.OrderBy(f => f.FirstSeen).ToList();
+        if (showBackground) return ordered;
+
+        var kept = new List<Flow>();
+        foreach (var flow in ordered)
+        {
+            var bare = flow.Steps.Count == 1 && flow.Errors.Count == 0 && flow.Root is { } root && root.Name.StartsWith("Route ");
+            if (bare)
+            {
+                var path = Describe(flow).Label;
+                var echoed = ordered.Any(other => !ReferenceEquals(other, flow) && Describe(other).Label == path
+                    && Math.Abs((other.FirstSeen - flow.FirstSeen).TotalSeconds) < 3
+                    && (IsRequest(other) || kept.Contains(other)));
+                if (echoed) continue;
+            }
+            kept.Add(flow);
+        }
+        return kept;
+    }
+
+    /// <summary>The systems involved, left to right: you, the app, then each dependency in the order it was first used.</summary>
+    private List<SeqLane> LanesOf(List<Flow> flows)
+    {
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var variable in vars.Where(v => !v.Secret))
+            if (Uri.TryCreate(variable.Value.Trim().Trim('"'), UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
+                names.TryAdd(uri.Authority, Friendly(variable.Name));
+
+        var lanes = new List<SeqLane> { new("you", "client", "You", "monitor"), new("app", "app", repo!.Name, "server") };
+        foreach (var step in flows.SelectMany(f => f.Ordered()))
+        {
+            if (DeviceOf(step) is not { } key || lanes.Any(l => l.Key == key)) continue;
+            var isDb = key.StartsWith("db:");
+            lanes.Add(new SeqLane(key, isDb ? "db" : "service", names.GetValueOrDefault(key) ?? (isDb ? key[3..] : key.Split(':')[0]), isDb ? "database" : "globe"));
+        }
+        return lanes;
+    }
+
+    private List<SeqRow> SequenceRows(List<Flow> flows, List<SeqLane> lanes)
+    {
+        var rows = new List<SeqRow>();
+        var number = 0;
+        foreach (var flow in flows)
+        {
+            var (verb, label, _) = Describe(flow);
+            var staged = IsStage(flow);
+            number++;
+            rows.Add(new SeqRow("stage", flow, null, null, 0, 1, verb, label,
+                $"{flow.FirstSeen.ToLocalTime():HH:mm:ss} · {flow.Ms:0} ms" + (flow.Outcome == "failed" ? " · failed" : flow.Errors.Count > 0 ? $" · {flow.Errors.Count} exception{(flow.Errors.Count == 1 ? "" : "s")}" : ""),
+                flow.Outcome == "failed", number));
+            if (staged) rows.Add(new SeqRow("in", flow, null, null, 0, 1, verb, verb is null ? label : $"{verb.ToLowerInvariant()} {label}", "", false, number));
+
+            var inside = new List<(DateTime At, SeqRow Row)>();
+            foreach (var step in flow.Steps.Values.Where(s => s.Category is "http" or "db"))
+            {
+                var lane = lanes.FindIndex(l => l.Key == DeviceOf(step));
+                if (lane < 0) continue;
+                var (callVerb, callLabel, _) = Describe(step);
+                flow.Bodies.TryGetValue(step.Id, out var body);
+                if (Intent(body?.Request) is { } intent) callLabel = $"{intent}  ·  {callLabel.Split('/').Last()}";
+                var meta = string.Join(" · ", new[]
+                {
+                    step.StatusCode?.ToString(), $"{step.Ms:0} ms",
+                    body?.Request is null ? null : $"sent {Size(body.Request)}",
+                    body?.Response is null ? null : $"got {Size(body.Response)}",
+                }.Where(part => part is not null));
+                inside.Add((step.Start, new SeqRow("call", flow, step.Id, null, 1, lane, callVerb, callLabel, meta, step.Failed, number)));
+            }
+            foreach (var error in flow.Errors)
+                inside.Add((error.At, new SeqRow("error", flow, null, error, 1, 1, null,
+                    $"{error.Type.Split('.').Last()}{(error.Unhandled ? "" : " (handled)")}", "", error.Unhandled, number)));
+            rows.AddRange(inside.OrderBy(i => i.At).Select(i => i.Row));
+
+            if (IsRequest(flow) && flow.Root is { } root)
+                rows.Add(new SeqRow("out", flow, null, null, 1, 0, null, $"response {root.StatusCode}", "", root.Failed, number));
+        }
+        return rows;
+    }
+
+    private static readonly string[] IntentFields =
+        ["targetCommand", "command", "commandName", "operation", "operationName", "action", "procedure", "storedProcedure", "queryName", "method"];
+
+    /// <summary>
+    /// Many systems send every call to one generic endpoint and say what they want in the body. When the request
+    /// names its command, that name describes the call better than the address does.
+    /// </summary>
+    private static string? Intent(string? requestBody)
+    {
+        if (requestBody is null || requestBody.Length > 200_000 || !requestBody.TrimStart().StartsWith('{')) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(requestBody);
+            foreach (var property in doc.RootElement.EnumerateObject())
+                if (property.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                    && IntentFields.Contains(property.Name, StringComparer.OrdinalIgnoreCase)
+                    && property.Value.GetString() is { Length: > 0 and < 80 } name)
+                    return name;
+        }
+        catch (System.Text.Json.JsonException) { }
+        return null;
+    }
+
+    private void PickSeq(SeqRow row)
+    {
+        (seqFlow, seqStep, seqError) = (row.Flow.TraceId, row.StepId, row.Error?.Key);
+    }
+
+    private void OpenProcess(string? id)
+    {
+        procId = id;
+        (seqFlow, seqStep, seqError) = (null, null, null);
+    }
+
+    private void StartRecording()
+    {
+        if (string.IsNullOrWhiteSpace(procName)) { Say("Give the process a name first.", error: true); return; }
+        (recordingName, recordingSince, procId) = (procName.Trim(), DateTime.UtcNow, null);
+    }
+
+    private void StopRecording() => SaveProcess(recordingName, recordingSince ?? DateTime.MinValue);
+
+    private void SaveCaptured()
+    {
+        if (string.IsNullOrWhiteSpace(procName)) { Say("Give the process a name first.", error: true); return; }
+        SaveProcess(procName.Trim(), DateTime.MinValue);
+    }
+
+    private void SaveProcess(string name, DateTime since) => Try(() =>
+    {
+        var flows = AllFlows.Where(f => f.FirstSeen >= since && !IsChatter(f) && IsStage(f)).OrderBy(f => f.FirstSeen).ToList();
+        if (flows.Count == 0) throw new VaultException("Nothing was captured in that time. Use the app while recording.");
+        var current = repo!;
+        var process = Recordings.Save(current, name, envName, flows);
+        saved.Insert(0, process);
+        (recordingSince, procName, procId) = (null, "", process.Id);
+        var bodies = flows.Sum(f => f.Bodies.Count);
+        Say($"Saved “{name}”: {flows.Count} steps, {bodies} calls with their data.");
+    });
+
+    private void DeleteProcess(SavedProcess process) => Try(() =>
+    {
+        Recordings.Delete(repo!, process);
+        saved.Remove(process);
+        procId = null;
+    });
+
+    /// <summary>
+    /// Starts the app with each recorded service replaced by the recording: the address variables that pointed at
+    /// those services are pointed at a local stand-in that answers as the real ones did.
+    /// </summary>
+    private async Task RunAgainst(SavedProcess process)
+    {
+        try
+        {
+            var current = repo!;
+            var env = CurrentEnv;
+            if (!Vaults.IsUnlocked(env)) throw new VaultException($"Unlock {env.Name} first.");
+            var target = targets.FirstOrDefault(t => t.Kind == "dotnet" && t.Name.Equals(current.DefaultTarget, StringComparison.OrdinalIgnoreCase))
+                ?? targets.FirstOrDefault(t => t.Kind == "dotnet")
+                ?? throw new VaultException("This repo has no .NET target to run.");
+            if (sessions.Any(s => s.Running && s.Repo == current.Name && s.Target == target.Name))
+                throw new VaultException($"{target.Name} is running. Stop it, then start the replay.");
+
+            var mock = await MockServer.StartAsync(process, () => { });
+            if (mock.Hosts.Count == 0)
+            {
+                await mock.DisposeAsync();
+                throw new VaultException("This recording holds no calls to other services, so there is nothing to stand in for.");
+            }
+            try
+            {
+                shown = Sessions.Start(Vaults, current, env, target, watch: false, debug: false, overrides: null, mock);
+            }
+            catch
+            {
+                await mock.DisposeAsync();
+                throw;
+            }
+            sessions = Sessions.All();
+            Say($"Started {target.Name} against “{process.Name}”. Calls to {string.Join(", ", mock.Hosts)} are answered from the recording.");
+        }
+        catch (VaultException ex) { Say(ex.Message, error: true); }
+    }
+
+    /// <summary>A captured body for display: secrets blanked, JSON indented.</summary>
+    private string ShowBody(string text)
+    {
+        foreach (var secret in vars.Where(v => v.Secret && v.Value.Length >= 6).Select(v => v.Value))
+            if (text.Contains(secret, StringComparison.Ordinal)) text = text.Replace(secret, "****");
+        return Pretty(FlowHub.Redact(text));
+    }
+
+    private async Task Copy(string text)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("rrCopy", text);
+            Say("Copied.");
+        }
+        catch (JSException) { Say("The browser refused to copy.", error: true); }
+    }
+
+    private RenderFragment BodyCards(FlowBody body) => __builder =>
+    {
+        @if (body.Request is not null)
+        {
+            var sent = ShowBody(body.Request);
+            <div class="capture">
+                <div class="capture-head">
+                    <Icon Name="box" Size="13" /> Sent <span class="flow-meta">@body.RequestType · @Size(body.Request)</span>
+                    <span class="spacer"></span>
+                    <button class="link-btn" @onclick="() => Copy(sent)">Copy</button>
+                </div>
+                <pre>@sent</pre>
+            </div>
+        }
+        @if (body.Response is not null)
+        {
+            var got = ShowBody(body.Response);
+            <div class="capture">
+                <div class="capture-head">
+                    <Icon Name="box" Size="13" /> Returned <span class="flow-meta">@body.ResponseType · @Size(body.Response)</span>
+                    <span class="spacer"></span>
+                    <button class="link-btn" @onclick="() => Copy(got)">Copy</button>
+                </div>
+                <pre>@got</pre>
+            </div>
+        }
+    };
 
     // ---------- code paths ----------
 

@@ -37,7 +37,7 @@ public static partial class DebugSupport
     /// Main; <paramref name="flowPipe"/> names the pipe the app reports its activity to.
     /// </summary>
     public static void Apply(IDictionary<string, string> environment, RepoInfo repo, TargetDef target,
-        bool waitForDebugger, string? flowPipe = null)
+        bool waitForDebugger, string? flowPipe = null, IEnumerable<KeyValuePair<string, string>>? redirects = null)
     {
         if (target.Kind != "dotnet" || target.Project is null)
             throw new VaultException("Debug runs are available for .NET targets only for now.");
@@ -46,6 +46,8 @@ public static partial class DebugSupport
             environment.TryGetValue("DOTNET_STARTUP_HOOKS", out var existing) && existing.Length > 0 ? $"{hook};{existing}" : hook;
         environment["RR_HOOK_TARGET"] = AssemblyName(Path.Combine(repo.Path, target.Project));
         if (flowPipe is not null) environment["RR_FLOW_PIPE"] = flowPipe;
+        // Replay: calls to these hosts are sent to a stand-in. One "host|address" per line.
+        if (redirects is not null) environment["RR_FLOW_REDIRECT"] = string.Join('\n', redirects.Select(r => $"{r.Key}|{r.Value}"));
         if (waitForDebugger)
         {
             environment["RR_DEBUG_WAIT"] = "1";

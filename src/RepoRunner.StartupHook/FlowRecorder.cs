@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -33,11 +34,24 @@ internal static class FlowRecorder
     [ThreadStatic] private static bool _busy;
     private static long _exceptionWindow;
     private static int _exceptionsInWindow;
+    // Replay: host → stand-in address. A redirected request remembers where it was really going.
+    private static Dictionary<string, string>? _redirects;
+    private static readonly ConditionalWeakTable<HttpRequestMessage, Uri> Originals = new();
     private static ActivityListener? _listener;
     private static IDisposable? _subscription;
 
-    public static void Start(string pipeName)
+    public static void Start(string pipeName, string? redirect)
     {
+        if (!string.IsNullOrEmpty(redirect))
+        {
+            _redirects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in redirect!.Split('\n'))
+            {
+                var cut = pair.IndexOf('|');
+                if (cut > 0) _redirects[pair.Substring(0, cut)] = pair.Substring(cut + 1);
+            }
+        }
+
         new Thread(() => Pump(pipeName)) { IsBackground = true, Name = "rr-flow" }.Start();
 
         _listener = new ActivityListener
@@ -116,9 +130,15 @@ internal static class FlowRecorder
                         break;
                     case "System.Net.Http.HttpRequestOut.Start":
                         CallStack();
+                        if (Get(e.Value, "Request") is HttpRequestMessage outgoing)
+                        {
+                            Body("request", outgoing.Content);
+                            Redirect(outgoing);
+                        }
                         break;
                     case "System.Net.Http.HttpRequestOut.Stop":
                         OutgoingHttp(e.Value);
+                        if (Get(e.Value, "Response") is HttpResponseMessage reply) Body("response", reply.Content);
                         break;
                     case "Microsoft.AspNetCore.Hosting.HttpRequestIn.Stop":
                         IncomingHttp(e.Value);
@@ -142,6 +162,9 @@ internal static class FlowRecorder
         if (activity is null) return;
         var request = Get(payload, "Request");
         var response = Get(payload, "Response");
+        var address = request is HttpRequestMessage sent && Originals.TryGetValue(sent, out var meant)
+            ? meant.ToString()
+            : Get(request, "RequestUri")?.ToString();
         Emit(w =>
         {
             w.WriteString("type", "span");
@@ -154,7 +177,9 @@ internal static class FlowRecorder
             w.WriteString("status", "Unset");
             w.WriteStartObject("tags");
             w.WriteString("http.request.method", Get(request, "Method")?.ToString());
-            w.WriteString("url.full", Get(request, "RequestUri")?.ToString());
+            w.WriteString("url.full", address);
+            w.WriteString("rr.url", address);
+            if (request is HttpRequestMessage replayed && Originals.TryGetValue(replayed, out _)) w.WriteString("rr.replayed", "true");
             if (Get(response, "StatusCode") is { } code) w.WriteString("http.response.status_code", Convert.ToInt32(code).ToString());
             w.WriteEndObject();
         });
@@ -225,6 +250,56 @@ internal static class FlowRecorder
             if (frames is not null) WriteFrames(w, frames, sourceOnly: false);
         });
     }
+
+    /// <summary>
+    /// In a replay, points a request for a recorded host at the stand-in instead. This happens after the app has
+    /// built the request and before it is sent, so it works wherever the app got the address from.
+    /// </summary>
+    private static void Redirect(HttpRequestMessage request)
+    {
+        if (_redirects is null || request.RequestUri is not { IsAbsoluteUri: true } target) return;
+        if (!_redirects.TryGetValue(target.Authority, out var standIn)) return;
+        try { Originals.Add(request, target); } catch (ArgumentException) { }
+        request.RequestUri = new Uri(standIn + target.PathAndQuery);
+    }
+
+    private const int MaxCapture = 600_000;
+
+    /// <summary>
+    /// The text of a request or response. The content is buffered first, so the app can still read it afterwards
+    /// exactly as it would have. Streams and binary payloads are left alone.
+    /// </summary>
+    private static void Body(string side, HttpContent? content)
+    {
+        var activity = Activity.Current;
+        if (activity is null || content is null) return;
+        var type = content.Headers.ContentType?.MediaType ?? "";
+        if (!IsText(type) || content.Headers.ContentLength > MaxCapture) return;
+
+        string text;
+        try
+        {
+            content.LoadIntoBufferAsync().GetAwaiter().GetResult();
+            text = content.ReadAsStringAsync().GetAwaiter().GetResult();
+        }
+        catch { return; }
+
+        Emit(w =>
+        {
+            w.WriteString("type", "body");
+            WriteIds(w, activity);
+            w.WriteString("side", side);
+            w.WriteString("contentType", type);
+            w.WriteNumber("length", text.Length);
+            w.WriteString("text", Cut(text, MaxCapture));
+        });
+    }
+
+    private static bool IsText(string mediaType) =>
+        mediaType.Length > 0
+        && !mediaType.Contains("event-stream") && !mediaType.Contains("ndjson") && !mediaType.Contains("grpc")
+        && (mediaType.Contains("json") || mediaType.Contains("xml") || mediaType.StartsWith("text/")
+            || mediaType.Contains("x-www-form-urlencoded") || mediaType.Contains("javascript"));
 
     /// <summary>The app's own methods that led to the operation now starting, innermost first.</summary>
     private static void CallStack()

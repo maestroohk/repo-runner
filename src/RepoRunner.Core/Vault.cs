@@ -364,6 +364,13 @@ public sealed partial class Vault : IDisposable
         return resolved;
     }
 
+    // ---------- sealing other data ----------
+
+    /// <summary>Encrypts data that belongs beside the vault, such as a recorded process, under the vault key.</summary>
+    public byte[] Protect(byte[] data, string purpose) => Aead.Seal(_encKey, data, "blob:" + purpose);
+
+    public byte[] Unprotect(byte[] blob, string purpose) => Aead.Open(_encKey, blob, "blob:" + purpose);
+
     // ---------- audit ----------
 
     public void Audit(string action, string? repo = null, string? env = null, string? detail = null) =>

@@ -34,14 +34,15 @@ internal static class StartupHook
 
             var pipe = Environment.GetEnvironmentVariable("RR_FLOW_PIPE");
             var wait = Environment.GetEnvironmentVariable("RR_DEBUG_WAIT") == "1";
+            var redirect = Environment.GetEnvironmentVariable("RR_FLOW_REDIRECT");
 
             // Processes this app starts must not be hooked as well.
-            foreach (var name in new[] { "RR_HOOK_TARGET", "RR_FLOW_PIPE", "RR_DEBUG_WAIT", "DOTNET_STARTUP_HOOKS" })
+            foreach (var name in new[] { "RR_HOOK_TARGET", "RR_FLOW_PIPE", "RR_FLOW_REDIRECT", "RR_DEBUG_WAIT", "DOTNET_STARTUP_HOOKS" })
                 Environment.SetEnvironmentVariable(name, null);
 
             if (!string.IsNullOrEmpty(pipe))
             {
-                try { StartRecorder(pipe!); }
+                try { StartRecorder(pipe!, redirect); }
                 catch { /* recording is optional */ }
             }
             if (wait) WaitForDebugger(pid);
@@ -54,7 +55,7 @@ internal static class StartupHook
 
     // Kept out of line so a missing diagnostics type cannot break Initialize itself.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void StartRecorder(string pipe) => FlowRecorder.Start(pipe);
+    private static void StartRecorder(string pipe, string? redirect) => FlowRecorder.Start(pipe, redirect);
 
     private static void WaitForDebugger(int pid)
     {
