@@ -191,7 +191,19 @@ public sealed partial class Vault : IDisposable
                                               || r.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
         if (clash is not null) throw new VaultException($"Already registered as '{clash.Name}' ({clash.Path}).");
         _db.Exec("INSERT INTO repos(name, path) VALUES($n, $p)", ("$n", name), ("$p", path));
-        return GetRepo(name);
+        var added = GetRepo(name);
+        // Repo ids are reused. Recordings left under this id by an earlier repo are not this repo's.
+        DeleteRecordings(added);
+        return added;
+    }
+
+    /// <summary>The folder a repo's recorded processes are kept in.</summary>
+    public string RecordingsFolder(RepoInfo repo) => Path.Combine(Home, "processes", repo.Id.ToString());
+
+    private void DeleteRecordings(RepoInfo repo)
+    {
+        var folder = RecordingsFolder(repo);
+        if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
     }
 
     public void SetRepoDefaults(RepoInfo repo, string? target, string? env) =>
@@ -204,6 +216,7 @@ public sealed partial class Vault : IDisposable
         _db.Exec("DELETE FROM targets WHERE repo_id=$id", ("$id", repo.Id));
         _db.Exec("DELETE FROM repo_groups WHERE repo_id=$id", ("$id", repo.Id));
         _db.Exec("DELETE FROM repos WHERE id=$id", ("$id", repo.Id));
+        DeleteRecordings(repo);
     }
 
     // ---------- targets ----------

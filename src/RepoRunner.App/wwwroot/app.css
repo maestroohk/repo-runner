@@ -493,6 +493,22 @@ button.frame:hover { background: var(--surface-3); color: var(--text); }
 .pcall-name { font: 650 13px var(--mono); color: var(--text); overflow-wrap: anywhere; }
 .pcall-to { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
 .pcall-ms { margin-left: auto; flex: none; font: 500 11.5px var(--mono); color: var(--text-2); }
+.chip-writes { flex: none; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent); border-radius: 5px; color: var(--warn); font-size: 10.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
+.resend-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.resend-editor { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); }
+.resend-editor textarea { min-height: 220px; }
+.resend-result { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface-2); }
+.resend-result.same { border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.resend-result.same .rr-head .icon { color: var(--ok); }
+.resend-result.changed { border-color: color-mix(in srgb, var(--warn) 60%, transparent); }
+.resend-result.changed .rr-head .icon { color: var(--warn); }
+.resend-result.failed { border-color: color-mix(in srgb, var(--danger) 60%, transparent); }
+.resend-result.failed .rr-head .icon { color: var(--danger); }
+.rr-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.recheck-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.recheck-progress { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.recheck-progress .bar { height: 4px; border-radius: 4px; background: var(--border); overflow: hidden; }
+.recheck-progress .bar i { display: block; height: 100%; background: var(--ok); transition: width .2s; }
 .pcall-io { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 8px; padding: 2px 10px 9px 10px; font-size: 12px; }
 .io-label { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .io-label.got { margin-left: 10px; }

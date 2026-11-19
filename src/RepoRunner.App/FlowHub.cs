@@ -52,6 +52,8 @@ public sealed class FlowBody
     public string? Request { get; set; }
     public string? ResponseType { get; set; }
     public string? Response { get; set; }
+    /// <summary>The headers the request went out with, cookies excluded. Kept so the call can be sent again the same way.</summary>
+    public Dictionary<string, string>? RequestHeaders { get; set; }
 }
 
 public sealed record FlowNote(DateTime At, string? SpanId, string Label, string? Title, string Body);
@@ -201,6 +203,11 @@ public sealed partial class FlowHub : IDisposable
             // Exceptions outside any request are unrelated to each other; give each its own entry.
             var traceId = Text("trace")
                 ?? (type == "exception" && e.TryGetProperty("key", out var loose) ? $"exception-{loose.GetInt64()}" : Loose);
+            // DNS, sockets and TLS handshakes are below the level a feature is debugged at. They are dropped before
+            // a flow is looked up, so they can neither create an empty flow nor remove one that holds data already.
+            if (type == "span" && Text("source") is { } plumbing && (plumbing.StartsWith("Experimental.") || plumbing.StartsWith("System.Net.NameResolution")
+                || plumbing.StartsWith("System.Net.Sockets") || plumbing.StartsWith("System.Net.Security")))
+                return;
             if (!_flows.TryGetValue(traceId, out var flow))
             {
                 if (_flows.Count >= MaxFlows)
@@ -212,13 +219,6 @@ public sealed partial class FlowHub : IDisposable
             {
                 case "span":
                 {
-                    // DNS, sockets and TLS handshakes are below the level a feature is debugged at.
-                    if (Text("source") is { } origin && (origin.StartsWith("Experimental.") || origin.StartsWith("System.Net.NameResolution")
-                        || origin.StartsWith("System.Net.Sockets") || origin.StartsWith("System.Net.Security")))
-                    {
-                        if (flow.Steps.Count == 0 && flow.Notes.Count == 0 && flow.Errors.Count == 0) _flows.Remove(traceId);
-                        return;
-                    }
                     var id = Text("id") ?? Guid.NewGuid().ToString("N");
                     if (!flow.Steps.TryGetValue(id, out var step)) flow.Steps[id] = step = new FlowStep { Id = id };
                     step.ParentId = Text("parent") ?? step.ParentId;
@@ -243,6 +243,14 @@ public sealed partial class FlowHub : IDisposable
                         // Masking happens when a body is shown.
                         if (Text("side") == "request") (body.RequestType, body.Request) = (Text("contentType"), captured.GetString());
                         else (body.ResponseType, body.Response) = (Text("contentType"), captured.GetString());
+                    }
+                    break;
+                case "headers":
+                    if (Text("id") is { } headerCall && e.TryGetProperty("headers", out var sentHeaders))
+                    {
+                        if (!flow.Bodies.TryGetValue(headerCall, out var holder)) flow.Bodies[headerCall] = holder = new FlowBody();
+                        holder.RequestHeaders = sentHeaders.EnumerateObject()
+                            .ToDictionary(h => h.Name, h => h.Value.GetString() ?? "", StringComparer.OrdinalIgnoreCase);
                     }
                     break;
                 case "stack":

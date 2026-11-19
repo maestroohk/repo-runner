@@ -28,6 +28,7 @@ builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddSingleton<VaultService>();
 builder.Services.AddSingleton<SessionManager>();
 builder.Services.AddSingleton<ProcessStore>();
+builder.Services.AddSingleton<Resender>();
 
 var app = builder.Build();
 var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));

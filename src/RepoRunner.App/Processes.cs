@@ -24,8 +24,7 @@ public sealed class ProcessStore(VaultService vaults)
         PreferredObjectCreationHandling = JsonObjectCreationHandling.Populate,
     };
 
-    private string Folder(RepoInfo repo) =>
-        Path.Combine(Path.GetDirectoryName(vaults.VaultFile)!, "processes", repo.Id.ToString());
+    private string Folder(RepoInfo repo) => vaults.Use(v => v.RecordingsFolder(repo));
 
     public SavedProcess Save(RepoInfo repo, string name, string env, List<Flow> flows)
     {

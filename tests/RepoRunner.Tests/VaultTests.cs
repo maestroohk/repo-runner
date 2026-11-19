@@ -208,6 +208,26 @@ public class VaultTests
     }
 
     [Fact]
+    public void Recordings_go_with_their_repo_and_never_pass_to_a_new_one()
+    {
+        using var home = new TempHome();
+        using var vault = Vault.Open(home.Dir("vault"));
+        var first = vault.AddRepo(home.Dir("repo-a"), "a");
+        Directory.CreateDirectory(vault.RecordingsFolder(first));
+        File.WriteAllText(Path.Combine(vault.RecordingsFolder(first), "x.rrp"), "recorded");
+
+        vault.RemoveRepo(first);
+        Assert.False(Directory.Exists(vault.RecordingsFolder(first)));
+
+        // Left behind by a version without the line above: the next repo to get this id must not see it.
+        Directory.CreateDirectory(vault.RecordingsFolder(first));
+        File.WriteAllText(Path.Combine(vault.RecordingsFolder(first), "stale.rrp"), "orphan");
+        var second = vault.AddRepo(home.Dir("repo-b"), "b");
+        Assert.Equal(first.Id, second.Id);
+        Assert.False(Directory.Exists(vault.RecordingsFolder(second)));
+    }
+
+    [Fact]
     public void Repo_is_found_from_a_subfolder()
     {
         using var home = new TempHome();

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Linq;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -132,6 +133,7 @@ internal static class FlowRecorder
                         CallStack();
                         if (Get(e.Value, "Request") is HttpRequestMessage outgoing)
                         {
+                            Headers(outgoing);
                             Body("request", outgoing.Content);
                             Redirect(outgoing);
                         }
@@ -269,6 +271,32 @@ internal static class FlowRecorder
     /// The text of a request or response. The content is buffered first, so the app can still read it afterwards
     /// exactly as it would have. Streams and binary payloads are left alone.
     /// </summary>
+    private static readonly HashSet<string> SkippedHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Host", "Content-Length", "Connection", "Transfer-Encoding", "Cookie", "traceparent", "tracestate", "Request-Id", "Correlation-Context", "baggage",
+    };
+
+    /// <summary>
+    /// The headers a request goes out with, so it can be sent again the same way. Cookies are left out: they belong
+    /// to a browser session, not to the call.
+    /// </summary>
+    private static void Headers(HttpRequestMessage request)
+    {
+        var activity = Activity.Current;
+        if (activity is null) return;
+        var all = request.Headers.Concat(request.Content?.Headers ?? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>())
+            .Where(h => !SkippedHeaders.Contains(h.Key)).ToList();
+        if (all.Count == 0) return;
+        Emit(w =>
+        {
+            w.WriteString("type", "headers");
+            WriteIds(w, activity);
+            w.WriteStartObject("headers");
+            foreach (var header in all) w.WriteString(header.Key, Cut(string.Join(", ", header.Value), 8000));
+            w.WriteEndObject();
+        });
+    }
+
     private static void Body(string side, HttpContent? content)
     {
         var activity = Activity.Current;

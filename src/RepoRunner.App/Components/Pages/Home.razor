@@ -4,6 +4,7 @@
 @inject VaultService Vaults
 @inject SessionManager Sessions
 @inject ProcessStore Recordings
+@inject Resender Sender
 @inject IHostApplicationLifetime Lifetime
 @inject IJSRuntime JS
 
@@ -783,6 +784,10 @@
                                             <span class="fact">Recorded <b>@opened.Created.ToString("d MMM HH:mm")</b> on <b>@opened.Env</b></span>
                                         }
                                         <span class="spacer"></span>
+                                        <button class="btn small" disabled="@recheckRunning" title="Send every lookup in this recording again, now, and compare the answers with the recorded ones. Calls that change data are not sent."
+                                                @onclick="() => Recheck(opened, steps)">
+                                            <Icon Name="refresh" Size="13" /> Re-check lookups
+                                        </button>
                                         @if (opened is not null)
                                         {
                                             <button class="btn primary small" title="Start the app with its services replaced by this recording's responses" @onclick="() => RunAgainst(opened)">
@@ -845,8 +850,38 @@
                                     </div>
                                 </div>
 
+                                var procKey = opened?.Id ?? "live";
+                                @if (recheckRunning && recheckFor == procKey)
+                                {
+                                    <div class="callout calm">
+                                        <Icon Name="refresh" />
+                                        <div class="recheck-progress">
+                                            <b>Re-checking lookups: @recheckDone of @recheckTotal sent.</b>
+                                            <div class="bar"><i style="width:@Pct(recheckTotal == 0 ? 0 : recheckDone / (double)recheckTotal)"></i></div>
+                                        </div>
+                                        <button class="btn small" @onclick="() => recheckStop?.Cancel()">Stop</button>
+                                    </div>
+                                }
                                 var baseline = compareId == "live" ? null : saved.FirstOrDefault(p => p.Id == compareId);
-                                @if (compareId is not null && (compareId == "live" || baseline is not null) && compareId != (opened?.Id ?? "live"))
+                                @if (recheckShown && !recheckRunning && recheckFor == procKey)
+                                {
+                                    var failedSends = recheckResults.Values.Count(r => r.Error is not null);
+                                    <div class="recheck-head">
+                                        <div>
+                                            <b>Sent @recheckResults.Count lookups again at @recheckAt.ToString("HH:mm") and compared the answers with the recording.</b>
+                                            <div class="flow-meta">
+                                                @(recheckSkipped == 0 ? "" : recheckSkipped == 1 ? "1 call that changes data was not sent; it shows as unchanged. " : $"{recheckSkipped} calls that change data were not sent; they show as unchanged. ")
+                                                @(failedSends == 0 ? "" : $"{failedSends} could not be sent. ")
+                                                @(recheckResults.Count < recheckTotal ? $"Stopped after {recheckResults.Count} of {recheckTotal}." : "")
+                                            </div>
+                                        </div>
+                                        <span class="spacer"></span>
+                                        <button class="btn small" @onclick="() => Recheck(opened, steps)"><Icon Name="refresh" Size="13" /> Re-check again</button>
+                                        <button class="btn small" @onclick="() => recheckShown = false"><Icon Name="back" Size="13" /> Back to the recording</button>
+                                    </div>
+                                    @CompareView(steps, Rechecked(steps), "Recorded", "Now")
+                                }
+                                else if (compareId is not null && (compareId == "live" || baseline is not null) && compareId != (opened?.Id ?? "live"))
                                 {
                                     @CompareView(StepsOf(ProcessFlows(baseline)), steps, baseline?.Name ?? "Current run", opened?.Name ?? "Current run")
                                 }
@@ -901,7 +936,16 @@
                                                             <button class="pcall-head" @onclick="() => openCall = callOpen ? null : callKey">
                                                                 <span class="badge @(call.Failed ? "bad" : call.Soft || call.Empty ? "warn" : "ok")">@(call.Step.StatusCode?.ToString() ?? "–")</span>
                                                                 <span class="pcall-name">@call.Name</span>
+                                                                @if (call.Writes)
+                                                                {
+                                                                    <span class="chip-writes" title="Sending this call again would change data">writes</span>
+                                                                }
                                                                 <span class="pcall-to">@call.Verb → @call.System · @call.Endpoint</span>
+                                                                @if (resent.TryGetValue(callKey, out var lastSend))
+                                                                {
+                                                                    var lastKind = Verdict(call, AgainCall(call, lastSend), lastSend).Kind;
+                                                                    <span class="badge @(lastKind == "same" ? "ok" : lastKind == "changed" ? "warn" : "bad")">re-sent · @(lastKind == "same" ? "same" : lastKind == "changed" ? "changed" : "failed")</span>
+                                                                }
                                                                 <span class="pcall-ms">@call.Step.Ms.ToString("0") ms</span>
                                                                 <Icon Name="@(callOpen ? "up" : "down")" Size="14" />
                                                             </button>
@@ -921,6 +965,7 @@
                                                             @if (callOpen)
                                                             {
                                                                 <div class="pcall-body">
+                                                                    @ResendPanel(call, callKey)
                                                                     @if (call.Body is null)
                                                                     {
                                                                         <div class="flow-meta">No body was captured for this call: it had none, or it was binary or a stream.</div>
@@ -1430,6 +1475,7 @@
     {
         timer?.Dispose();
         playTimer?.Dispose();
+        recheckStop?.Cancel();
     }
 
     // ---------- loading ----------
@@ -2037,6 +2083,7 @@
         procId = id;
         (openCall, allSteps, procSystem, procProblemsOnly, procFilter) = (null, null, null, false, "");
         (compareId, openDiff) = (null, null);
+        (recheckShown, editingCall, editor) = (false, null, null);
         toggledSteps.Clear();
     }
 
@@ -2161,7 +2208,12 @@
 
     /// <summary>One call to another system, with what it carried summarised for reading at a glance.</summary>
     private sealed record ProcCall(FlowStep Step, FlowBody? Body, string Verb, string Name, string Endpoint, string System, string SystemKey,
-        bool Failed, bool Soft, bool Empty, List<(string Name, string Value)> Sent, string Returned, int? Rows);
+        bool Failed, bool Soft, bool Empty, List<(string Name, string Value)> Sent, string Returned, int? Rows)
+    {
+        /// <summary>True when sending this call again would change data rather than only read it.</summary>
+        public bool Writes => CallSafety.Writes(Verb, Name);
+        public string? Url => Step.Tag("rr.url", "url.full", "http.url");
+    }
 
     /// <summary>Something the user did, and the calls it caused. Count is above 1 when identical quiet steps were merged.</summary>
     private sealed record ProcStep(int Number, Flow Flow, string? Verb, string Label, List<ProcCall> Calls, int Count, string? Page)
@@ -2308,12 +2360,32 @@
     private static string Whitespace(string text) => System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
 
     /// <summary>A process as its steps, each with its calls. Runs of identical steps that did nothing are merged.</summary>
-    private List<ProcStep> StepsOf(List<Flow> flows)
+    /// <summary>Hosts named after the vault variable that points at them: 192.168.185.11:4405 → OpsApi.</summary>
+    private Dictionary<string, string> SystemNames()
     {
         var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var variable in vars.Where(v => !v.Secret))
             if (Uri.TryCreate(variable.Value.Trim().Trim('"'), UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
                 names.TryAdd(uri.Authority, Friendly(variable.Name));
+        return names;
+    }
+
+    private static ProcCall MakeCall(FlowStep step, FlowBody? body, Dictionary<string, string> names)
+    {
+        var key = DeviceOf(step) ?? "";
+        var (callVerb, path, _) = Describe(step);
+        var intent = Intent(body?.Request);
+        var (returned, soft, rowCount) = ReturnedSummary(body?.Response, step.StatusCode);
+        // Some services answer "nothing matched" with 404. That is an answer, not a breakdown.
+        var empty = step.StatusCode == 404 && body?.Response is { Length: < 600 } said && NothingFound().IsMatch(said);
+        return new ProcCall(step, body, callVerb ?? "CALL", intent ?? path, intent is null ? "" : path.Split('/').Last(),
+            names.GetValueOrDefault(key) ?? key.Split(':')[0], key, step.Failed && !empty, soft && !step.Failed, empty,
+            SentSummary(body?.Request), empty ? "nothing found (404)" : returned, empty ? 0 : rowCount);
+    }
+
+    private List<ProcStep> StepsOf(List<Flow> flows)
+    {
+        var names = SystemNames();
 
         var steps = new List<ProcStep>();
         string? page = null;
@@ -2324,16 +2396,8 @@
             var calls = new List<ProcCall>();
             foreach (var step in flow.Steps.Values.Where(s => s.Category is "http" or "db").OrderBy(s => s.Start))
             {
-                var key = DeviceOf(step) ?? "";
-                var (callVerb, path, _) = Describe(step);
                 flow.Bodies.TryGetValue(step.Id, out var body);
-                var intent = Intent(body?.Request);
-                var (returned, soft, rowCount) = ReturnedSummary(body?.Response, step.StatusCode);
-                // Some services answer "nothing matched" with 404. That is an answer, not a breakdown.
-                var empty = step.StatusCode == 404 && body?.Response is { Length: < 600 } said && NothingFound().IsMatch(said);
-                calls.Add(new ProcCall(step, body, callVerb ?? "CALL", intent ?? path, intent is null ? "" : path.Split('/').Last(),
-                    names.GetValueOrDefault(key) ?? key.Split(':')[0], key, step.Failed && !empty, soft && !step.Failed, empty,
-                    SentSummary(body?.Request), empty ? "nothing found (404)" : returned, empty ? 0 : rowCount));
+                calls.Add(MakeCall(step, body, names));
             }
 
             // Hovering, focusing and key presses are not things the user set out to do; skip them unless they caused something.
@@ -2389,6 +2453,275 @@
         allSteps = open;
         toggledSteps.Clear();
     }
+
+    // ---------- sending captured calls again ----------
+
+    private readonly Dictionary<string, ResendResult> resent = [];
+    private readonly HashSet<string> sending = [];
+    private string? editingCall;
+    private EditableBody? editor;
+    private string editText = "";
+    private string? editError;
+
+    private string? recheckFor;
+    private bool recheckRunning, recheckShown;
+    private int recheckDone, recheckTotal, recheckSkipped;
+    private DateTime recheckAt;
+    private CancellationTokenSource? recheckStop;
+    private readonly Dictionary<string, ResendResult> recheckResults = [];
+
+    /// <summary>The environment the calls on screen were recorded on.</summary>
+    private string RecordedOn => saved.FirstOrDefault(p => p.Id == procId)?.Env ?? flowSession?.Env ?? envName;
+
+    private IEnumerable<string> SecretValues => vars.Where(v => v.Secret && v.Value.Length >= 4).Select(v => v.Value);
+
+    /// <summary>Why a call cannot be sent again, or null when it can.</summary>
+    private string? ResendBlocked(ProcCall call)
+    {
+        var env = RecordedOn;
+        if (envs.FirstOrDefault(e => e.Name == env)?.Protected == true)
+            return $"Recorded on {env}, a protected environment: calls from it are never sent again.";
+        if (call.Url is null) return "The address of this call was not recorded.";
+        if (call.Body?.Request is null && call.Body?.RequestHeaders?.ContainsKey("Content-Type") == true)
+            return "Its request body was binary or a stream and was not captured, so it cannot be sent again exactly.";
+        return null;
+    }
+
+    private static string HeaderNote(ProcCall call) => call.Body?.RequestHeaders switch
+    {
+        null => "No headers were recorded for this call, so it goes out with only its content type.",
+        var headers => $"Goes out with the {headers.Count} header{(headers.Count == 1 ? "" : "s")} it was recorded with"
+            + (headers.ContainsKey("Authorization") ? ", including its Authorization." : "."),
+    };
+
+    private Task<ResendResult> SendAgain(ProcCall call, string? body, bool edited, CancellationToken cancel = default) =>
+        Sender.SendAsync(call.Verb, call.Url!, body, call.Body?.RequestType, call.Body?.RequestHeaders, edited, cancel);
+
+    /// <summary>Sends one call again. A call that changes data needs a second, deliberate click.</summary>
+    private void Resend(string key, ProcCall call, string? body = null, bool edited = false)
+    {
+        if (ResendBlocked(call) is { } why) { Say(why, error: true); return; }
+        if (call.Writes && confirmKey != "send:" + key) { confirmKey = "send:" + key; return; }
+        confirmKey = null;
+        sending.Add(key);
+        var (current, env) = (repo!, RecordedOn);
+        Vaults.Use(v => v.Audit(edited ? "resend-edited" : "resend", current.Name, env, call.Name));
+        _ = Task.Run(async () =>
+        {
+            var result = await SendAgain(call, edited ? body : call.Body?.Request, edited);
+            await InvokeAsync(() =>
+            {
+                resent[key] = result;
+                sending.Remove(key);
+                StateHasChanged();
+            });
+        });
+    }
+
+    private void StartEdit(string key, ProcCall call)
+    {
+        editor = new EditableBody(call.Body?.Request, SecretValues);
+        (editingCall, editText, editError) = (key, editor.Text, null);
+    }
+
+    private void SendEdited(string key, ProcCall call)
+    {
+        string body;
+        try { body = editor!.Restore(editText); }
+        catch (VaultException ex) { editError = ex.Message; return; }
+        editError = null;
+        Resend(key, call, body, edited: true);
+    }
+
+    /// <summary>A recorded call as it would read had it been made now, from what came back when it was sent again.</summary>
+    private ProcCall AgainCall(ProcCall recorded, ResendResult result)
+    {
+        var step = new FlowStep
+        {
+            Id = recorded.Step.Id + "~again",
+            ParentId = recorded.Step.ParentId,
+            Source = recorded.Step.Source,
+            Name = recorded.Step.Name,
+            Kind = recorded.Step.Kind,
+            Start = result.At.ToUniversalTime(),
+            Ms = result.Ms,
+            Status = result.Error is null ? "Unset" : "Error",
+        };
+        foreach (var (name, value) in recorded.Step.Tags) step.Tags[name] = value;
+        step.Tags.Remove("http.response.status_code");
+        step.Tags.Remove("http.status_code");
+        if (result.Status is { } status) step.Tags["http.response.status_code"] = status.ToString();
+        var body = new FlowBody
+        {
+            RequestType = recorded.Body?.RequestType,
+            Request = result.SentBody ?? recorded.Body?.Request,
+            ResponseType = result.ContentType,
+            Response = result.Body,
+            RequestHeaders = recorded.Body?.RequestHeaders,
+        };
+        var call = MakeCall(step, body, SystemNames());
+        return result.Error is null ? call : call with { Failed = true, Returned = $"could not send: {result.Error}" };
+    }
+
+    /// <summary>Whether the answer is the one recorded, in a sentence. What the caller changed on purpose is not a difference in the answer.</summary>
+    private static (string Kind, string Text) Verdict(ProcCall recorded, ProcCall again, ResendResult result)
+    {
+        if (result.Error is not null) return ("failed", $"Could not send: {result.Error}");
+        if (result.Status is 401 or 403) return ("failed", $"Refused with {result.Status}. The credentials recorded with this call may have expired.");
+        var answer = CompareCalls(recorded, again).Notes
+            .Where(n => !n.StartsWith("sent ") && !n.Contains("more inputs differ") && !n.StartsWith("address ") && !n.StartsWith("slower")).ToList();
+        return answer.Count == 0
+            ? ("same", "Same answer as recorded.")
+            : ("changed", "The answer has changed: " + string.Join("; ", answer.Take(3)) + ".");
+    }
+
+    private void Recheck(SavedProcess? opened, List<ProcStep> steps)
+    {
+        var all = steps.SelectMany(s => s.Calls.Select(c => (Key: s.Flow.TraceId + "|" + c.Step.Id, Call: c))).ToList();
+        var lookups = all.Where(x => !x.Call.Writes && ResendBlocked(x.Call) is null).ToList();
+        if (lookups.Count == 0)
+        {
+            Say(all.Count > 0 && ResendBlocked(all[0].Call) is { } why ? why : "This recording has no lookups that can be sent again.", error: true);
+            return;
+        }
+        recheckStop?.Cancel();
+        recheckStop = new CancellationTokenSource();
+        var stop = recheckStop.Token;
+        (recheckFor, recheckRunning, recheckShown) = (opened?.Id ?? "live", true, false);
+        (recheckDone, recheckTotal, recheckSkipped, recheckAt) = (0, lookups.Count, all.Count(x => x.Call.Writes), DateTime.Now);
+        recheckResults.Clear();
+        var (current, env) = (repo!, RecordedOn);
+        Vaults.Use(v => v.Audit("recheck", current.Name, env, $"{lookups.Count} lookups from {opened?.Name ?? "the current run"}"));
+
+        // One at a time, in recorded order: a re-check should load the service no more than the app did.
+        _ = Task.Run(async () =>
+        {
+            foreach (var (key, call) in lookups)
+            {
+                if (stop.IsCancellationRequested) break;
+                var result = await SendAgain(call, call.Body?.Request, false, stop);
+                await InvokeAsync(() =>
+                {
+                    recheckResults[key] = result;
+                    recheckDone++;
+                    StateHasChanged();
+                });
+            }
+            await InvokeAsync(() =>
+            {
+                recheckRunning = false;
+                recheckShown = recheckResults.Count > 0;
+                StateHasChanged();
+            });
+        });
+    }
+
+    /// <summary>The steps again, with each re-checked lookup replaced by what it answers now.</summary>
+    private List<ProcStep> Rechecked(List<ProcStep> steps) =>
+        steps.Select(s => s with
+        {
+            Calls = s.Calls.Select(c => recheckResults.TryGetValue(s.Flow.TraceId + "|" + c.Step.Id, out var r) ? AgainCall(c, r) : c).ToList(),
+        }).ToList();
+
+    private RenderFragment ResendPanel(ProcCall call, string key) => __builder =>
+    {
+        var blocked = ResendBlocked(call);
+        var busy = sending.Contains(key);
+        var armed = confirmKey == "send:" + key;
+        var isEditing = editingCall == key;
+        <div class="resend-bar">
+            @if (call.Writes)
+            {
+                <span class="badge warn">changes data</span>
+                <span class="flow-meta">Sending this again saves, sends or changes something for real.</span>
+            }
+            else
+            {
+                <span class="badge">lookup</span>
+                <span class="flow-meta">Only reads, so it is safe to send again.</span>
+            }
+            <span class="spacer"></span>
+            @if (blocked is not null)
+            {
+                <span class="flow-meta">@blocked</span>
+            }
+            else if (!isEditing)
+            {
+                <button class="btn small" disabled="@busy" @onclick="() => StartEdit(key, call)"><Icon Name="pencil" Size="13" /> Edit and re-send</button>
+                <button class="btn small @(armed ? "confirm" : call.Writes ? "" : "primary")" disabled="@busy" @onclick="() => Resend(key, call)">
+                    <Icon Name="refresh" Size="13" /> @(busy ? "Sending…" : armed ? "Click again to send for real" : "Re-send")
+                </button>
+            }
+        </div>
+
+        @if (isEditing && blocked is null)
+        {
+            <div class="resend-editor">
+                <div class="mono flow-meta">@call.Verb @call.Url</div>
+                <textarea class="input" rows="14" spellcheck="false" @bind="editText"></textarea>
+                <div class="flow-meta">@HeaderNote(call) Bullets stand for passwords and vault secrets; they go out as recorded unless you type over them.</div>
+                @if (editError is not null)
+                {
+                    <div class="error-text">@editError</div>
+                }
+                <div class="row">
+                    <button class="btn small @(armed ? "confirm" : "primary")" disabled="@busy" @onclick="() => SendEdited(key, call)">
+                        @(busy ? "Sending…" : armed ? "Click again to send for real" : "Send")
+                    </button>
+                    <button class="btn small" @onclick="() => { editText = editor!.Text; editError = null; }">Undo my changes</button>
+                    <button class="btn small" @onclick="() => { editingCall = null; editor = null; }">Close</button>
+                </div>
+            </div>
+        }
+
+        @if (resent.TryGetValue(key, out var result))
+        {
+            var again = AgainCall(call, result);
+            var (kind, text) = Verdict(call, again, result);
+            var fields = CompareCalls(call, again).Reply.Where(f => !f.Volatile).ToList();
+            <div class="resend-result @kind">
+                <div class="rr-head">
+                    <Icon Name="@(kind == "same" ? "check" : "alert")" Size="15" />
+                    <b>@text</b>
+                    <span class="spacer"></span>
+                    <span class="flow-meta">sent @result.At.ToString("HH:mm:ss")@(result.Edited ? " · edited" : "") · @(result.Status?.ToString() ?? "no answer") · @result.Ms.ToString("0") ms</span>
+                    <button class="icon-btn" title="Dismiss" @onclick="() => resent.Remove(key)"><Icon Name="x" Size="13" /></button>
+                </div>
+                @if (fields.Count > 0)
+                {
+                    <table class="diff-table">
+                        <thead><tr><th>Field in the answer</th><th>Recorded</th><th>Now</th></tr></thead>
+                        <tbody>
+                            @foreach (var field in fields.Take(40))
+                            {
+                                <tr><td>@field.Path</td><td>@(field.Old ?? "—")</td><td>@(field.New ?? "—")</td></tr>
+                            }
+                        </tbody>
+                    </table>
+                    @if (fields.Count > 40)
+                    {
+                        <div class="flow-meta">@(fields.Count - 40) more fields differ.</div>
+                    }
+                }
+                <details class="more">
+                    <summary>Full data, recorded and now</summary>
+                    <div class="io-grid">
+                        <div class="side">
+                            <div class="needs-title">Recorded</div>
+                            @if (call.Body is { } was)
+                            {
+                                @BodyCards(was)
+                            }
+                        </div>
+                        <div class="side">
+                            <div class="needs-title">Now</div>
+                            @BodyCards(again.Body!)
+                        </div>
+                    </div>
+                </details>
+            </div>
+        }
+    };
 
     // ---------- compare two runs ----------
 
@@ -2455,6 +2788,15 @@
                 var index = 0;
                 foreach (var item in element.EnumerateArray()) Flatten(item, $"{path}[{index++}]", into, depth + 1);
                 break;
+            // Some services return JSON inside a string field. Compare what it holds, not the string.
+            case System.Text.Json.JsonValueKind.String when element.GetString() is { Length: > 1 and < 200_000 } inner
+                && inner.TrimStart() is ['{' or '[', ..]:
+                try
+                {
+                    using (var nested = System.Text.Json.JsonDocument.Parse(inner)) Flatten(nested.RootElement, path, into, depth + 1);
+                }
+                catch (System.Text.Json.JsonException) { into[path] = inner; }
+                break;
             default:
                 into[path] = Scalar(element);
                 break;
@@ -2501,10 +2843,19 @@
     private static string AddressOf(ProcCall call) =>
         Uri.TryCreate(call.Step.Tag("rr.url", "url.full", "http.url"), UriKind.Absolute, out var uri) ? uri.PathAndQuery : "";
 
+    /// <summary>"result.data[0].status" → "status".</summary>
+    private static string FieldName(string path)
+    {
+        var last = path.Split('.').Last();
+        var bracket = last.IndexOf('[');
+        return bracket > 0 ? last[..bracket] : last.Length > 0 ? last : path;
+    }
+
     private static CallDiff CompareCalls(ProcCall before, ProcCall after)
     {
         var notes = new List<string>();
-        if (before.Step.StatusCode != after.Step.StatusCode) notes.Add($"status {before.Step.StatusCode} → {after.Step.StatusCode}");
+        if (before.Step.StatusCode != after.Step.StatusCode)
+            notes.Add($"HTTP {before.Step.StatusCode?.ToString() ?? "no answer"} → {after.Step.StatusCode?.ToString() ?? "no answer"}");
         if (Standing(before) != Standing(after)) notes.Add($"was {Standing(before)}, now {Standing(after)}");
         if (AddressOf(before) != AddressOf(after)) notes.Add($"address {Clip(AddressOf(before), 60)} → {Clip(AddressOf(after), 60)}");
 
@@ -2514,9 +2865,18 @@
         if (sentReal.Count > 3) notes.Add($"{sentReal.Count - 3} more inputs differ");
 
         var reply = DiffFields(before.Body?.Response, after.Body?.Response);
-        var replyReal = reply.Count(d => !d.Volatile);
+        var replyReal = reply.Where(d => !d.Volatile).ToList();
         if (before.Rows != after.Rows) notes.Add($"rows returned {before.Rows?.ToString() ?? "none"} → {after.Rows?.ToString() ?? "none"}");
-        else if (replyReal > 0) notes.Add($"{replyReal} field{(replyReal == 1 ? "" : "s")} in the reply differ");
+        // Changed fields are named, the first with its values; past six they are counted.
+        else if (replyReal.Count > 0)
+        {
+            var first = replyReal[0];
+            var others = replyReal.Skip(1).Select(f => FieldName(f.Path)).Distinct().ToList();
+            var lead = $"{FieldName(first.Path)}: {Clip(first.Old is null or "" ? "empty" : first.Old, 30)} → {Clip(first.New is null or "" ? "empty" : first.New, 30)}";
+            notes.Add(others.Count == 0 ? lead
+                : replyReal.Count <= 6 ? $"{lead}; {string.Join(", ", others)} also changed"
+                : $"{lead}; {replyReal.Count - 1} more fields changed");
+        }
 
         if (after.Step.Ms > before.Step.Ms * 3 && after.Step.Ms - before.Step.Ms > 500)
             notes.Add($"slower: {before.Step.Ms:0} ms → {after.Step.Ms:0} ms");
