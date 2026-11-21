@@ -19,7 +19,25 @@ public sealed class SandboxServer : IAsyncDisposable
     public static readonly string[] SignInHosts = ["login.microsoftonline.com", "login.microsoft.com", "login.windows.net", "sts.windows.net"];
 
     /// <param name="Source">recording (the same question) | similar (the same command, other inputs) | synthetic</param>
-    public sealed record Hit(DateTime At, string Method, string Host, string Label, string Source, int Status, string? From);
+    /// <param name="Into">When a copy of the call was also passed to another sandboxed app on this machine: where.</param>
+    public sealed record Hit(DateTime At, string Method, string Host, string Label, string Source, int Status, string? From, string? Into = null);
+
+    /// <summary>
+    /// Where to pass a copy of a call, so another app of yours, also running in the sandbox here, can be traced
+    /// handling it (OpsPortal's call to OpsApi, followed inside OpsApi). Given the method and path with query; returns
+    /// a full address on this machine, or null. The app still gets the stand-in's answer, never the copy's.
+    /// </summary>
+    public Func<string, string, Uri?>? MirrorTo { get; set; }
+
+    // Copies only ever go to this machine, where a development certificate is the norm, so it is not checked.
+    private static readonly HttpClient Mirror = new(new SocketsHttpHandler
+    {
+        UseProxy = false, UseCookies = false, AllowAutoRedirect = false,
+        SslOptions = new System.Net.Security.SslClientAuthenticationOptions { RemoteCertificateValidationCallback = (_, _, _, _) => true },
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(60),
+    };
 
     private sealed record Recorded(int Status, string? ContentType, string? Body, string From);
 
@@ -146,13 +164,62 @@ public sealed class SandboxServer : IAsyncDisposable
                 ? new { errorCode = "0", errorDescription = "Accepted by the RepoRunner sandbox. Nothing was saved or sent.", sandbox = true }
                 : new { errorCode = "100", errorDescription = "No data found. The RepoRunner sandbox has no recorded answer for this call.", sandbox = true });
         }
-        lock (_hits) _hits.Add(new Hit(DateTime.Now, method, authority, label, source, status, answer?.From));
+        string? into = null;
+        if (MirrorTo?.Invoke(method, pathAndQuery) is { } copyTo && copyTo.IsLoopback)
+        {
+            into = copyTo.GetLeftPart(UriPartial.Authority);
+            _ = PassCopy(copyTo, method, body, context.Request.ContentType, context.Request.Headers);
+        }
+        lock (_hits) _hits.Add(new Hit(DateTime.Now, method, authority, label, source, status, answer?.From, into));
+    }
+
+    /// <summary>
+    /// Sends the copy with the caller's trace context, so the other app's trace joins this one. Only to this machine
+    /// (checked by the caller); what comes back is ignored.
+    /// </summary>
+    private static async Task PassCopy(Uri target, string method, string body, string? contentType, IHeaderDictionary headers)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(new HttpMethod(method), target);
+            if (body.Length > 0 || method is "POST" or "PUT" or "PATCH")
+                request.Content = new StringContent(body, System.Text.Encoding.UTF8);
+            if (contentType is not null && request.Content is not null)
+                request.Content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(contentType);
+            foreach (var name in new[] { "traceparent", "tracestate", "Authorization", "Accept" })
+                if (headers.TryGetValue(name, out var value)) request.Headers.TryAddWithoutValidation(name, (IEnumerable<string>)value);
+            using var reply = await Mirror.SendAsync(request);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException) { }
     }
 
     public async ValueTask DisposeAsync()
     {
         try { await _app.StopAsync(TimeSpan.FromSeconds(2)); } catch (OperationCanceledException) { }
         await _app.DisposeAsync();
+    }
+}
+
+/// <summary>Where on another app a sandboxed call belongs, by the routes that app's scan found.</summary>
+public static class CopyRoutes
+{
+    /// <summary>
+    /// The path and query on the other app for a call, or null when none of its endpoints takes it. The call's path may
+    /// carry a prefix the other app does not (a gateway's "/OpsApis"), so its endings are tried, longest first.
+    /// </summary>
+    public static string? Match(ProcessMap map, string method, string pathAndQuery)
+    {
+        var cut = pathAndQuery.IndexOf('?');
+        var (path, query) = cut < 0 ? (pathAndQuery, "") : (pathAndQuery[..cut], pathAndQuery[cut..]);
+        var segments = path.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var routes = map.Processes.Where(p => p.Kind == "endpoint" && p.Route is not null
+            && (p.Verb is null || p.Verb.Equals(method, StringComparison.OrdinalIgnoreCase))).ToList();
+        for (var i = 0; i < segments.Length; i++)
+        {
+            var candidate = "/" + string.Join('/', segments[i..]);
+            if (routes.Any(p => FeatureScan.RouteRegex(p.Route!).IsMatch(candidate))) return candidate + query;
+        }
+        return null;
     }
 }
 

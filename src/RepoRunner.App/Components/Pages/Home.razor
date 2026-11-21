@@ -1142,6 +1142,7 @@
                                                             @if (callOpen)
                                                             {
                                                                 <div class="pcall-body">
+                                                                    @Inside(step.Flow, call)
                                                                     @ResendPanel(call, callKey)
                                                                     @if (call.Body is null)
                                                                     {
@@ -2329,7 +2330,7 @@
     /// <summary>The flows on show: a saved process, or the current run (from the moment recording began, while recording).</summary>
     private List<Flow> ProcessFlows(SavedProcess? opened)
     {
-        IEnumerable<Flow> flows = opened?.Flows
+        IEnumerable<Flow> flows = opened?.Flows.Where(f => f.App is null || f.App == opened.Flows[0].App || f.App == repo?.Name)
             ?? AllFlows.Where(f => !IsChatter(f) && (recordingSince is null || f.FirstSeen >= recordingSince));
         if (!showBackground) flows = flows.Where(IsStage);
         var ordered = flows.OrderBy(f => f.FirstSeen).ToList();
@@ -2403,6 +2404,10 @@
         var flows = AllFlows.Where(f => f.FirstSeen >= since && !IsChatter(f) && IsStage(f)).OrderBy(f => f.FirstSeen).ToList();
         if (flows.Count == 0) throw new VaultException("Nothing was captured in that time. Use the app while recording.");
         var current = repo!;
+        // What your other sandboxed apps did while handling these calls goes with the recording.
+        var traces = flows.Select(f => f.TraceId).ToHashSet();
+        flows.AddRange(Sessions.All().Where(s => s.Repo != current.Name && s.Flows is not null)
+            .SelectMany(s => s.Flows!.Snapshot()).Where(f => traces.Contains(f.TraceId)));
         var process = Recordings.Save(current, name, envName, flows);
         saved.Insert(0, process);
         (recordingSince, procName, procId) = (null, "", process.Id);
@@ -2429,6 +2434,70 @@
             return;
         }
         await Run(target, "Run", process.Id, sandboxOnly: true);
+    }
+
+    /// <summary>
+    /// What another of your apps did with this call, when a copy reached it in the sandbox: its flow shares the trace
+    /// and hangs off this call's span. Looked for in the running apps and in the open recording.
+    /// </summary>
+    private List<Flow> InsideOf(Flow outer, FlowStep call)
+    {
+        var candidates = Sessions.All().Where(s => s.Flows is not null && s.Repo != (outer.App ?? repo?.Name))
+            .SelectMany(s => s.Flows!.Snapshot())
+            .Concat(saved.FirstOrDefault(p => p.Id == procId)?.Flows ?? []);
+        return candidates.Where(f => !ReferenceEquals(f, outer) && f.TraceId == outer.TraceId && f.App != outer.App && f.Root?.ParentId == call.Id)
+            .DistinctBy(f => (f.App, f.Root?.Id)).ToList();
+    }
+
+    private RenderFragment Inside(Flow outer, ProcCall call) => __builder =>
+    {
+        foreach (var inner in InsideOf(outer, call.Step))
+        {
+            var steps = inner.Steps.Values.Where(s => s.Id != inner.Root?.Id && s.Category is "http" or "db").OrderBy(s => s.Start).ToList();
+            <div class="inside">
+                <div class="inside-head">
+                    <Icon Name="layers" Size="13" /> Inside <b>@inner.App</b>
+                    <span class="flow-meta">a copy of this call, handled by @inner.App running in the sandbox here · @(inner.Root?.StatusCode?.ToString() ?? "no answer") · @inner.Ms.ToString("0") ms</span>
+                </div>
+                @if (steps.Count == 0 && inner.Errors.Count == 0)
+                {
+                    <div class="flow-meta">It made no calls of its own.</div>
+                }
+                @foreach (var s in steps)
+                {
+                    var refused = s.StatusText?.Contains("RepoRunner sandbox", StringComparison.Ordinal) == true;
+                    <div class="inside-row">
+                        <span class="tk @(s.Category == "db" ? "sp" : "http")">@(s.Category == "db" ? "Database" : "Calls")</span>
+                        <span class="mono">@(s.Category == "db" ? s.Tag("db.statement", "db.query.text", "db.operation") ?? s.Name : $"{s.Tag("http.request.method", "http.method")} {s.Tag("rr.url", "url.full", "http.url")}")</span>
+                        @if (refused)
+                        {
+                            <span class="badge">refused by the sandbox</span>
+                        }
+                        else if (s.StatusCode is { } innerStatus)
+                        {
+                            <span class="badge @(innerStatus >= 400 ? "warn" : "ok")">@innerStatus</span>
+                        }
+                    </div>
+                }
+                @foreach (var error in inner.Errors.Take(3))
+                {
+                    var sandboxed = error.Message.Contains("RepoRunner sandbox", StringComparison.Ordinal);
+                    <div class="inside-row">
+                        <span class="tk @(sandboxed ? "env" : "http")">@(sandboxed ? "Stopped" : "Error")</span>
+                        <span>@(sandboxed ? "It tried to reach " + Between(error.Message, "connection to ", " was refused") + ", which the sandbox refused. On a real server it would continue from here." : $"{error.Type.Split('.').Last()}: {error.Message}")</span>
+                    </div>
+                }
+            </div>
+        }
+    };
+
+    private static string Between(string text, string start, string end)
+    {
+        var a = text.IndexOf(start, StringComparison.Ordinal);
+        if (a < 0) return "another system";
+        a += start.Length;
+        var b = text.IndexOf(end, a, StringComparison.Ordinal);
+        return b < 0 ? text[a..] : text[a..b];
     }
 
     /// <summary>A captured body for display: secrets blanked, JSON indented.</summary>
@@ -3782,6 +3851,7 @@
                 var current = repo!;
                 var recordings = await Task.Run(() => Recordings.List(current));
                 server = await SandboxServer.StartAsync(recordings, preferredRecording);
+                server.MirrorTo = CopyTarget(repo!, repos);
             }
             shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug", sandbox: server);
             tab = "output";
@@ -3795,6 +3865,23 @@
             Say(ex.Message, error: true);
         }
     }
+
+    /// <summary>
+    /// For a sandboxed app's call: the same endpoint on another of your apps running in the sandbox here, if its
+    /// scan knows a route that ends like the call's path (OpsPortal's ".../OpsApis/api/Generic/Execute" → a local
+    /// OpsApi's "/api/Generic/Execute"). Worked out per call, so the other app can be started later.
+    /// </summary>
+    private Func<string, string, Uri?> CopyTarget(RepoInfo from, List<RepoInfo> known) => (method, pathAndQuery) =>
+    {
+        foreach (var other in Sessions.All().Where(s => s.Running && s.Sandbox is not null && s.Repo != from.Name && s.Url is not null))
+        {
+            if (known.FirstOrDefault(r => r.Name == other.Repo) is not { } otherRepo || Found.For(otherRepo).Map is not { } map) continue;
+            if (CopyRoutes.Match(map, method, pathAndQuery) is not { } local) continue;
+            var root = other.Url!.Replace("://0.0.0.0", "://127.0.0.1").Replace("://*", "://127.0.0.1").Replace("://+", "://127.0.0.1");
+            return Uri.TryCreate(new Uri(root), local, out var target) ? target : null;
+        }
+        return null;
+    };
 
     private void SetLive(EnvInfo env, bool live) => Try(() =>
     {

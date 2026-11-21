@@ -77,6 +77,8 @@ public sealed class FlowError
 public sealed class Flow
 {
     public required string TraceId { get; init; }
+    /// <summary>The repo whose app this flow ran in.</summary>
+    public string? App { get; set; }
     public DateTime FirstSeen { get; init; } = DateTime.UtcNow;
     /// <summary>When the last event for this flow arrived. Not saved: it only says whether a live flow has gone quiet.</summary>
     [JsonIgnore] public DateTime LastEvent { get; set; } = DateTime.UtcNow;
@@ -176,6 +178,9 @@ public sealed partial class FlowHub : IDisposable
             ? (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString()
             : address;
 
+    /// <summary>The repo whose app reports to this hub; each flow is labelled with it.</summary>
+    public string? App { get; init; }
+
     public FlowHub(IEnumerable<string> secretValues, Action changed)
     {
         _secrets = secretValues.Where(v => v.Length >= 6).Distinct().OrderByDescending(v => v.Length).ToList();
@@ -261,7 +266,7 @@ public sealed partial class FlowHub : IDisposable
             {
                 if (_flows.Count >= MaxFlows)
                     _flows.Remove(_flows.Values.OrderBy(f => f.FirstSeen).First().TraceId);
-                _flows[traceId] = flow = new Flow { TraceId = traceId };
+                _flows[traceId] = flow = new Flow { TraceId = traceId, App = App };
             }
             flow.LastEvent = DateTime.UtcNow;
 

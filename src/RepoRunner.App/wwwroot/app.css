@@ -712,3 +712,7 @@ a.repo-item { text-decoration: none; color: inherit; }
 .disc-foot { margin-top: 14px; }
 .run-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; margin: 0 0 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .run-line > .icon { color: var(--muted); }
+.inside { margin: 0 0 12px; padding: 10px 12px; border-left: 3px solid var(--accent); border-radius: 8px; background: var(--surface-3); }
+.inside-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-bottom: 6px; font-size: 13px; }
+.inside-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 3px 0; font-size: 12.5px; }
+.inside-row .mono { word-break: break-all; }

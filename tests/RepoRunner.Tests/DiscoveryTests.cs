@@ -114,6 +114,18 @@ public class DiscoveryTests
     }
 
     [Theory]
+    [InlineData("GET", "/OpsApis/api/Validator/getAccDetails/1/2?x=1", "/api/Validator/getAccDetails/1/2?x=1")]
+    [InlineData("GET", "/api/Validator/getAccDetails/1/2", "/api/Validator/getAccDetails/1/2")]
+    [InlineData("POST", "/OpsApis/api/Validator/getAccDetails/1/2", null)] // the route only takes GET
+    [InlineData("GET", "/OpsApis/api/Claims/List", null)]
+    public void A_sandboxed_call_is_copied_to_the_endpoint_that_takes_it(string method, string path, string? expected)
+    {
+        using var home = new TempHome();
+        var map = Discovery.Scan(Sample(home));
+        Assert.Equal(expected, RepoRunner.App.CopyRoutes.Match(map, method, path));
+    }
+
+    [Theory]
     [InlineData("SaveEditAsync", "Save edit")]
     [InlineData("OnHospitalChanged", "Hospital changed")]
     [InlineData("NoNinRegistrations", "No nin registrations")]

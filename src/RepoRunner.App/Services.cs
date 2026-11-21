@@ -140,7 +140,7 @@ public sealed class SessionManager
             environment["RR_ENV"] = env.Name;
             environment["RR_TARGET"] = target.Name;
             var secretValues = resolved.SecretNames.Select(n => resolved.Values[n]).ToList();
-            if (record || sandbox is not null) hub = new FlowHub(secretValues, () => Interlocked.Increment(ref _version));
+            if (record || sandbox is not null) hub = new FlowHub(secretValues, () => Interlocked.Increment(ref _version)) { App = repo.Name };
             if (debug || hub is not null) DebugSupport.Apply(environment, repo, target, waitForDebugger: debug, flowPipe: hub?.PipeName,
                 sandboxTarget: sandbox?.Base, sandboxAllowed: SandboxServer.SignInHosts);
             vault.Audit((debug ? "debug" : watch ? "watch" : "run") + (sandbox is null ? "-live" : "-sandbox"), repo.Name, env.Name, target.Name);
