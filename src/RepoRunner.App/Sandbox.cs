@@ -18,9 +18,9 @@ public sealed partial class SandboxServer : IAsyncDisposable
     /// <summary>Hosts a sandboxed app may still reach, so people can sign in. Nothing else leaves the machine.</summary>
     public static readonly string[] SignInHosts = ["login.microsoftonline.com", "login.microsoft.com", "login.windows.net", "sts.windows.net"];
 
-    /// <param name="Source">recording (the same question) | similar (the same command, other inputs) | synthetic</param>
+    /// <param name="Source">read (a lookup answered by the real server) | recording (the same question) | similar (the same command, other inputs) | synthetic</param>
     /// <param name="Into">When a copy of the call was also passed to another sandboxed app on this machine: where.</param>
-    public sealed record Hit(DateTime At, string Method, string Host, string Label, string Source, int Status, string? From, string? Into = null);
+    public sealed record Hit(DateTime At, string Method, string Host, string Label, string Source, int Status, string? From, string? Into = null, string? Problem = null);
 
     /// <summary>
     /// Where to pass a copy of a call, so another app of yours, also running in the sandbox here, can be traced
@@ -28,6 +28,21 @@ public sealed partial class SandboxServer : IAsyncDisposable
     /// a full address on this machine, or null. The app still gets the stand-in's answer, never the copy's.
     /// </summary>
     public Func<string, string, Uri?>? MirrorTo { get; set; }
+
+    /// <summary>
+    /// When true, a call whose name says it only looks something up (Get, Search, List...) is sent to the real server
+    /// and its answer passed back, so the app has its reference data and your access. Anything that may save,
+    /// approve, send or delete, or whose name does not say, never leaves this machine.
+    /// </summary>
+    public bool ReadThrough { get; set; }
+
+    private static readonly HttpClient Real = new(new SocketsHttpHandler { UseCookies = false, AllowAutoRedirect = false })
+    {
+        Timeout = TimeSpan.FromSeconds(60),
+    };
+
+    private static readonly HashSet<string> NotForwarded = new(StringComparer.OrdinalIgnoreCase)
+        { "Host", "Connection", "Content-Length", "Transfer-Encoding", "Keep-Alive", "Upgrade", "Proxy-Connection", "Expect" };
 
     // Copies only ever go to this machine, where a development certificate is the norm, so it is not checked.
     private static readonly HttpClient Mirror = new(new SocketsHttpHandler
@@ -143,7 +158,16 @@ public sealed partial class SandboxServer : IAsyncDisposable
         Recorded? answer = null;
         var source = "synthetic";
         var exactKey = ExactKey(authority, method, pathAndQuery, body);
-        if (_exact.TryGetValue(exactKey, out var list))
+        string? problem = null;
+        Recorded? real = null;
+        if (ReadThrough && !CallSafety.Writes(method, label))
+            (real, problem) = await ReadReal(scheme, authority, pathAndQuery, method, body, context.Request);
+        if (real is not null)
+        {
+            answer = real;
+            source = "read";
+        }
+        else if (_exact.TryGetValue(exactKey, out var list))
         {
             // The same question asked again is answered in recorded order; after the last, the last repeats.
             lock (_served)
@@ -186,7 +210,30 @@ public sealed partial class SandboxServer : IAsyncDisposable
             into = copyTo.GetLeftPart(UriPartial.Authority);
             _ = PassCopy(copyTo, method, body, context.Request.ContentType, context.Request.Headers);
         }
-        lock (_hits) _hits.Add(new Hit(DateTime.Now, method, authority, label, source, status, answer?.From, into));
+        lock (_hits) _hits.Add(new Hit(DateTime.Now, method, authority, label, source, status, answer?.From, into, problem));
+    }
+
+    /// <summary>Asks the real server a lookup on the app's behalf, with the app's own headers. Null if it cannot be reached.</summary>
+    private static async Task<(Recorded?, string?)> ReadReal(string scheme, string authority, string pathAndQuery, string method, string body, HttpRequest incoming)
+    {
+        if (scheme is not ("http" or "https") || !Uri.TryCreate($"{scheme}://{authority}{pathAndQuery}", UriKind.Absolute, out var target)) return (null, "not a web address");
+        try
+        {
+            using var request = new HttpRequestMessage(new HttpMethod(method), target);
+            if (body.Length > 0) request.Content = new StringContent(body, System.Text.Encoding.UTF8);
+            if (incoming.ContentType is { } type && request.Content is not null)
+                request.Content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(type);
+            foreach (var (name, value) in incoming.Headers)
+                if (!NotForwarded.Contains(name) && !name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase))
+                    request.Headers.TryAddWithoutValidation(name, (IEnumerable<string>)value);
+            using var reply = await Real.SendAsync(request);
+            var text = await reply.Content.ReadAsStringAsync();
+            return (new Recorded((int)reply.StatusCode, reply.Content.Headers.ContentType?.ToString(), text, "the real server"), null);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            return (null, ex.InnerException?.Message is { } inner ? $"{ex.Message} ({inner})" : ex.Message);
+        }
     }
 
     /// <summary>

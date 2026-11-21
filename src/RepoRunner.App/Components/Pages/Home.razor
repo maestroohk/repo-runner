@@ -239,11 +239,11 @@
                             }
                             else
                             {
-                                <b>Sandbox: nothing leaves this computer.</b>
+                                <b>Sandbox: nothing you save, approve or send leaves this computer.</b>
                                 <span>
-                                    When you start a .NET app on @safetyEnv.Name, RepoRunner answers its calls to other services itself, with answers
-                                    from your recordings where it has them and harmless stand-in answers otherwise. Only signing in to Microsoft goes out.
-                                    Any other connection is refused before it is made.
+                                    When you start a .NET app on @safetyEnv.Name, it can still look things up on @(safetyEnv.Name)'s servers (your access, lists,
+                                    member details), so it works as usual. Anything that would save, approve, send or delete is answered by RepoRunner
+                                    itself: “accepted”, and nothing happens. Direct connections to databases and other systems are refused.
                                 </span>
                             }
                         </div>
@@ -3856,6 +3856,7 @@
                 var recordings = await Task.Run(() => Recordings.List(current));
                 server = await SandboxServer.StartAsync(recordings, preferredRecording);
                 server.MirrorTo = CopyTarget(repo!, repos);
+                server.ReadThrough = true;
             }
             shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug", sandbox: server);
             tab = "output";
@@ -3903,6 +3904,8 @@
         var refused = attempts.Where(a => !a.Allowed).ToList();
         var signIns = attempts.Count(a => a.Allowed);
         var recorded = hits.Count(h => h.Source is "recording" or "similar");
+        var read = hits.Count(h => h.Source == "read");
+        var kept = hits.Count(h => h.Source != "read" && CallSafety.Writes(h.Method, h.Label));
         var standIn = hits.Count(h => h.Source == "synthetic");
         <div class="sandbox-facts">
             @if (session.Breach is not null)
@@ -3917,6 +3920,8 @@
             {
                 <span class="fact ok-text"><Icon Name="shield" Size="13" /> Sandboxed</span>
             }
+            <span class="fact" title="Lookups answered by the real server: reading only, nothing changed">Looked up <b>@read</b></span>
+            <span class="fact" title="Calls that would save, approve, send or delete. RepoRunner answered them; nothing was sent.">Changes held back <b>@kept</b></span>
             <span class="fact" title="Calls answered with what the real service said during one of your recordings">From recordings <b>@recorded</b></span>
             <span class="fact" title="Calls no recording covers. Changes get “accepted”, lookups get “nothing found”. Nothing is saved.">Stand-in answers <b>@standIn</b></span>
             <span class="fact" title="Connections the app tried to open to other machines. Each was refused before anything was sent.">Connections refused <b class="@(refused.Count > 0 ? "warn-text" : "")">@refused.Count</b></span>
@@ -3931,6 +3936,10 @@
                     @foreach (var group in hits.GroupBy(h => (h.Source, h.Method, h.Label)).OrderByDescending(g => g.Count()).Take(40))
                     {
                         <div class="mono miss">@SourceWord(group.Key.Source) · @group.Key.Method @group.Key.Label@(group.Count() > 1 ? $"  ×{group.Count()}" : "")</div>
+                        @if (group.Select(h => h.Problem).LastOrDefault(p => p is not null) is { } why)
+                        {
+                            <div class="mono miss warn-text">  could not look it up on @group.First().Host: @why</div>
+                        }
                     }
                     @foreach (var group in refused.GroupBy(a => a.Host ?? a.Address).Take(20))
                     {
@@ -3943,6 +3952,7 @@
 
     private static string SourceWord(string source) => source switch
     {
+        "read" => "looked up on the real server",
         "recording" => "recorded answer",
         "similar" => "recorded answer to a similar call",
         _ => "stand-in answer",
