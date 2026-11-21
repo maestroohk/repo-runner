@@ -4,6 +4,7 @@
 @page "/repo/{RepoName}/{Section}/{Item}"
 @page "/flow/{FocusRepo}"
 @inject NavigationManager Nav
+@inject Discoveries Found
 @implements IDisposable
 @inject VaultService Vaults
 @inject SessionManager Sessions
@@ -200,7 +201,33 @@
                 </header>
 
                 @{ var safetyEnv = envs.FirstOrDefault(e => e.Name == envName); }
-                @if (safetyEnv is not null)
+                @if (showingSection && !Focused)
+                {
+                    // Inside a tab the run targets fold into one line, so what was opened starts at the top.
+                    var running = RepoSessions.Where(x => x.Running).ToList();
+                    <div class="run-line">
+                        <Icon Name="@(safetyEnv?.Live == true ? "globe" : "shield")" Size="14" />
+                        @if (running.Count > 0)
+                        {
+                            @foreach (var r in running)
+                            {
+                                <span class="live-pill small"><span class="pulse"></span> @r.Target · @r.Env@(r.Sandbox is not null ? " · sandbox" : "") · @Elapsed(r)</span>
+                                @if (r.Url is not null)
+                                {
+                                    <a class="btn small" href="@r.Url" target="_blank" rel="noopener noreferrer" onclick="window.open(this.href, '_blank', 'noopener'); return false;">Open app <Icon Name="external" Size="12" /></a>
+                                }
+                                <button class="btn small stop" @onclick="() => StopSession(r)"><Icon Name="stop" Size="10" /> Stop</button>
+                            }
+                        }
+                        else
+                        {
+                            <span class="flow-meta">Nothing running. @(safetyEnv?.Live == true ? $"{envName} is live." : $"Apps started on {envName} run in the sandbox.")</span>
+                        }
+                        <span class="spacer"></span>
+                        <a class="btn small" href="@UrlFor(repo)">Run targets</a>
+                    </div>
+                }
+                else if (safetyEnv is not null)
                 {
                     <div class="safety @(safetyEnv.Live ? "live" : "sandboxed")">
                         <Icon Name="@(safetyEnv.Live ? "globe" : "shield")" Size="18" />
@@ -234,6 +261,8 @@
                     </div>
                 }
 
+                @if (!showingSection || Focused)
+                {
                 <section class="targets">
                     @if (targets.Count == 0)
                     {
@@ -323,6 +352,7 @@
                         </article>
                     }
                 </section>
+                }
 
                 <section class="panel">
                     <div class="panel-tabs" role="tablist">
@@ -336,8 +366,19 @@
                                 <span class="pulse"></span>
                             }
                         </button>
+                        <button class="ptab @(tab == "found" ? "active" : "")" title="What people can do in this app, worked out from its code" @onclick="@(() => ShowTab("found"))">
+                            <Icon Name="layers" /> Processes
+                            @if (Found.For(repo).Map is { } foundMap)
+                            {
+                                <span class="tab-count">@foundMap.Processes.Count</span>
+                            }
+                            else
+                            {
+                                <span class="pulse" title="Reading the code"></span>
+                            }
+                        </button>
                         <button class="ptab @(tab == "processes" ? "active" : "")" @onclick="@(() => ShowTab("processes"))">
-                            <Icon Name="layers" /> Recordings
+                            <Icon Name="play" /> Recordings
                             @if (recordingSince is not null)
                             {
                                 <span class="rec-dot on"></span>
@@ -363,7 +404,7 @@
                             }
                         </button>
                         <button class="ptab @(tab == "features" ? "active" : "")" @onclick="@(() => ShowTab("features"))">
-                            <Icon Name="code" /> Features
+                            <Icon Name="code" /> Code paths
                             @if (scan is not null)
                             {
                                 <span class="tab-count">@scan.Features.Count</span>
@@ -379,7 +420,14 @@
                     </div>
 
                     <div class="panel-body">
-                        @if (tab == "output")
+                        @if (tab == "found")
+                        {
+                            <ProcessesView Repo="repo" Entry="Found.For(repo)" Others="OtherMaps()" EnvName="@envName"
+                                           KnownSettings="@(locked ? null : vars.Select(v => v.Name).ToHashSet(StringComparer.OrdinalIgnoreCase))"
+                                           OpenKey="@foundKey" OnOpen="OpenFound" OnRescan="() => Found.Rescan(repo)"
+                                           LinkTo="@((name, key) => repos.FirstOrDefault(r => r.Name == name) is { } other ? UrlFor(other, "found", FoundSlug(key)) : "")" />
+                        }
+                        else if (tab == "output")
                         {
                             @if (RepoSessions.Count == 0)
                             {
@@ -1582,6 +1630,7 @@
         timer = new Timer(_ =>
         {
             if (Keeper.Version != seenKept) InvokeAsync(() => { NoticeKept(); StateHasChanged(); });
+            if (Found.Version != seenFound) { seenFound = Found.Version; InvokeAsync(StateHasChanged); }
             var version = Sessions.Version;
             if (version == seenVersion && !sessions.Any(s => s.Running) && unlocked.Count == 0 && message is null) return;
             seenVersion = version;
@@ -1607,7 +1656,8 @@
     [
         ("vars", "variables", "Variables"),
         ("output", "output", "Output"),
-        ("features", "features", "Features"),
+        ("found", "processes", "Processes"),
+        ("features", "code", "Code paths"),
         ("processes", "recordings", "Recordings"),
         ("flow", "map", "Live map"),
         ("files", "files", "Plaintext files"),
@@ -1631,6 +1681,7 @@
     {
         "processes" => saved.FirstOrDefault(x => x.Id == procId)?.Name,
         "features" => codeFeature is null ? null : codeFeature.Route ?? codeFeature.Name,
+        "found" => foundKey is null ? null : Found.For(repo!).Map?.Processes.FirstOrDefault(p => p.Key == foundKey)?.Name ?? "Process",
         "flow" => flowId is null ? null : "One request",
         _ => null,
     };
@@ -1639,6 +1690,7 @@
     {
         "processes" => procId,
         "features" => codeFeature is null ? null : FeatureKey(codeFeature),
+        "found" => foundKey is null ? null : FoundSlug(foundKey),
         "flow" => flowId,
         _ => null,
     };
@@ -1675,6 +1727,7 @@
             procId = null;
             flowId = null;
             codeFeature = null;
+            foundKey = null;
             tab = RepoSessions.Any(x => x.Running) ? "output" : "vars";
             return;
         }
@@ -1687,6 +1740,9 @@
             case "flow":
                 if (Item is null) CloseFlow();
                 else if (flowId != Item) OpenFlow(Item, null);
+                break;
+            case "found":
+                foundKey = Item is null ? null : Item.Replace('~', '/');
                 break;
             case "features":
                 if (Item is null) codeFeature = null;
@@ -3802,6 +3858,23 @@
     };
 
     private void StopSession(RunSession session) => Sessions.Stop(session);
+
+    private string? foundKey;
+
+    /// <summary>A process key as it goes in the address: slashes would read as more of the path.</summary>
+    private static string FoundSlug(string key) => key.Replace('/', '~');
+
+    private void OpenFound(string? key)
+    {
+        foundKey = key;
+        tab = "found";
+        showingSection = true;
+    }
+
+    private Dictionary<string, ProcessMap> OtherMaps() =>
+        Found.Loaded(repos.Where(r => r.Id != repo?.Id));
+
+    private long seenFound = -1;
 
     private void ShowTab(string key)
     {

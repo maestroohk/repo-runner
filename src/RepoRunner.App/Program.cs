@@ -30,6 +30,7 @@ builder.Services.AddSingleton<SessionManager>();
 builder.Services.AddSingleton<ProcessStore>();
 builder.Services.AddSingleton<Resender>();
 builder.Services.AddSingleton<FailureKeeper>();
+builder.Services.AddSingleton<Discoveries>();
 
 var app = builder.Build();
 var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));

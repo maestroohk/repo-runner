@@ -1,0 +1,390 @@
+@* What people can do in a repo, worked out by reading its code: each page, endpoint and job, its steps, and the
+   stored procedures, other systems and settings each step reaches. Written for anyone, not only developers. *@
+
+@if (Entry.Map is not { } map)
+{
+    <div class="state">
+        @if (Entry.Failed)
+        {
+            <span class="glyph"><Icon Name="alert" Size="22" /></span>
+            <h3>The code could not be read</h3>
+            <p>@Entry.Note</p>
+            <button class="btn small" @onclick="OnRescan"><Icon Name="refresh" Size="13" /> Try again</button>
+        }
+        else
+        {
+            <span class="glyph"><Icon Name="search" Size="22" /></span>
+            <h3>Reading the code of @Repo.Name…</h3>
+            <p>RepoRunner is working out which processes exist: every page and API, what each one does, and which stored procedures, other systems and settings it uses. This takes a few seconds and happens once; the result is kept.</p>
+        }
+    </div>
+}
+else
+{
+    var open = OpenKey is null ? null : map.Processes.FirstOrDefault(p => p.Key == OpenKey);
+    names = Canonical(map);
+    var touches = map.Processes.SelectMany(p => p.Touches).ToList();
+
+    <div class="disc-bar">
+        @if (open is null)
+        {
+            <div class="disc-search">
+                <Icon Name="search" Size="14" />
+                <input class="input" placeholder="Search: a page, a stored procedure, a setting, a system…" @bind="search" @bind:event="oninput" />
+            </div>
+            <select class="input disc-area-pick" value="@area" @onchange="e => area = e.Value?.ToString() ?? string.Empty" title="Show one part of the app">
+                <option value="">All parts of the app</option>
+                @foreach (var a in map.Processes.Select(p => p.Area).Distinct())
+                {
+                    <option value="@a">@a</option>
+                }
+            </select>
+        }
+        else
+        {
+            <button class="btn small" @onclick="() => OnOpen.InvokeAsync(null)"><Icon Name="back" Size="13" /> All processes</button>
+        }
+        <span class="spacer"></span>
+        <span class="flow-meta" title="@($"{map.Files} files read in {map.Took.TotalSeconds:0.0} s")">
+            @if (Entry.Scanning)
+            {
+                <span>Scanning again…</span>
+            }
+            else
+            {
+                <span>Read @When(map.Scanned)</span>
+            }
+        </span>
+        <button class="btn small" disabled="@Entry.Scanning" title="Read the code again now. RepoRunner also does this by itself when the code changes." @onclick="OnRescan">
+            <Icon Name="refresh" Size="13" /> Scan again
+        </button>
+    </div>
+    @if (Entry.Note is { } note && !Entry.Failed && note.StartsWith("The code changed"))
+    {
+        <div class="callout calm"><Icon Name="refresh" /><div>@note</div></div>
+    }
+
+    @if (open is null)
+    {
+        <div class="disc-intro">
+            <b>@map.Processes.Count processes found in @Repo.Name.</b>
+            RepoRunner read the code (nothing was run) and found every page and API, what each one does, and what it touches:
+            <span class="disc-legend"><span class="tk sp">@touches.Where(t => t.Kind == "sp").Select(t => t.Title).Distinct().Count() stored procedures</span>
+            <span class="tk http">@touches.Where(t => t.Kind == "http").Select(t => t.Title).Distinct().Count() other systems</span>
+            <span class="tk env">@touches.Where(t => t.Kind is "env" or "config").Select(t => t.Title).Distinct().Count() settings</span></span>
+            Open one to see its steps.
+        </div>
+
+        var shown = map.Processes.Where(p => (area.Length == 0 || p.Area == area) && Matches(p)).ToList();
+        @if (shown.Count == 0)
+        {
+            <div class="state"><h3>Nothing matches “@search”</h3><p>Try part of a page's name, a stored procedure such as ManualClaims, or a setting such as EsbUrl.</p></div>
+        }
+        @foreach (var group in shown.GroupBy(p => p.Area))
+        {
+            <section class="disc-group">
+                <h4>@group.Key <span class="tab-count">@group.Count()</span></h4>
+                <div class="disc-grid">
+                    @foreach (var p in group)
+                    {
+                        var sps = p.Touches.Where(t => t.Kind == "sp").Select(t => t.Title).Distinct().ToList();
+                        var systems = p.Touches.Where(t => t.Kind == "http").Select(t => SystemName(t)).Distinct().ToList();
+                        var changes = p.Touches.Where(t => t.Kind == "sp" && t.Changes == true).Select(t => t.Title).Distinct().ToList();
+                        var hit = MatchedTouch(p);
+                        <button class="disc-card" @onclick="() => OnOpen.InvokeAsync(p.Key)">
+                            <span class="disc-card-head">
+                                <span class="kind kind-@p.Kind">@KindWord(p)</span>
+                                <b>@p.Name</b>
+                            </span>
+                            @if (p.Route is not null)
+                            {
+                                <span class="mono disc-route">@(p.Kind == "page" || p.Verb is null ? "" : p.Verb + " ")@p.Route</span>
+                            }
+                            <span class="disc-card-facts">
+                                @p.Steps.Count step@(p.Steps.Count == 1 ? "" : "s")
+                                @if (sps.Count > 0)
+                                {
+                                    <span> · @sps.Count procedure@(sps.Count == 1 ? "" : "s")</span>
+                                }
+                                @if (systems.Count > 0)
+                                {
+                                    <span> · @string.Join(", ", systems.Take(3))@(systems.Count > 3 ? "…" : "")</span>
+                                }
+                            </span>
+                            @if (hit is not null)
+                            {
+                                <span class="disc-hit">Matches <span class="mono">@hit</span></span>
+                            }
+                            else if (changes.Count > 0)
+                            {
+                                <span class="disc-hit">Changes data: <span class="mono">@string.Join(", ", changes.Take(2))@(changes.Count > 2 ? "…" : "")</span></span>
+                            }
+                        </button>
+                    }
+                </div>
+            </section>
+        }
+    }
+    else
+    {
+        var sps = open.Touches.Where(t => t.Kind == "sp").DistinctBy(t => t.Title).ToList();
+        var systems = open.Touches.Where(t => t.Kind == "http").Select(SystemName).Distinct().ToList();
+        var settings = open.Touches.Where(t => t.Kind is "env" or "config").DistinctBy(t => t.Title).ToList();
+        var missing = settings.Where(t => t.Kind == "env" && KnownSettings is not null && !KnownSettings.Contains(t.Title)).ToList();
+
+        <header class="disc-head">
+            <span class="kind kind-@open.Kind">@KindWord(open)</span>
+            <div>
+                <h3>@open.Name</h3>
+                <div class="flow-meta">@open.Area@(open.Route is null ? "" : " · ")<span class="mono">@(open.Kind == "page" || open.Verb is null ? "" : open.Verb + " ")@open.Route</span></div>
+            </div>
+        </header>
+        <div class="disc-summary">
+            <div><b>@open.Steps.Count</b> <span>thing@(open.Steps.Count == 1 ? "" : "s") a person or app can do here</span></div>
+            <div><b>@sps.Count</b> <span>stored procedure@(sps.Count == 1 ? "" : "s"), @sps.Count(t => t.Changes == true) of which change data</span></div>
+            <div><b>@systems.Count</b> <span>other system@(systems.Count == 1 ? "" : "s")@(systems.Count > 0 ? ": " + string.Join(", ", systems) : "")</span></div>
+            <div>
+                <b class="@(missing.Count > 0 ? "warn-text" : "")">@settings.Count</b>
+                <span>setting@(settings.Count == 1 ? "" : "s")@(missing.Count > 0 ? $", {missing.Count} not set on {EnvName}" : "")</span>
+            </div>
+        </div>
+
+        <ol class="disc-steps">
+            @foreach (var step in open.Steps)
+            {
+                <li class="disc-step">
+                    <div class="disc-step-title">
+                        <b>@step.Title</b>
+                        <span class="flow-meta mono" title="Where this starts in the code">@ShortFile(step.File):@step.Line</span>
+                    </div>
+                    @foreach (var t in step.Touches.Where(t => t.Kind == "sp"))
+                    {
+                        var others = UsedElsewhere(map, open, t.Title);
+                        <div class="disc-touch">
+                            <span class="tk sp" title="A stored procedure: a named program in the database">Database</span>
+                            <span class="mono">@t.Title</span>
+                            @ChangeBadge(t.Changes)
+                            @if (t.Via is not null)
+                            {
+                                <span class="flow-meta">run through @SystemWord(t.Via)</span>
+                            }
+                            @if (others.Count > 0)
+                            {
+                                <span class="disc-also">also used by
+                                    @foreach (var (o, i) in others.Take(4).Select((o, i) => (o, i)))
+                                    {
+                                        @(i > 0 ? ", " : " ")<a href="" @onclick="() => OnOpen.InvokeAsync(o.Key)" @onclick:preventDefault>@o.Name</a>
+                                    }
+                                    @(others.Count > 4 ? $" and {others.Count - 4} more" : "")
+                                </span>
+                            }
+                        </div>
+                    }
+                    @foreach (var t in step.Touches.Where(t => t.Kind is "http" or "db"))
+                    {
+                        var link = t.Kind == "http" ? Follow(t) : null;
+                        <div class="disc-touch">
+                            @if (t.Kind == "db")
+                            {
+                                <span class="tk sp">Database</span>
+                                <span>runs the procedure or query it is given <span class="mono flow-meta">(@t.Detail)</span></span>
+                            }
+                            else
+                            {
+                                <span class="tk http" title="A call to another system over the network">@SystemName(t)</span>
+                                @if (t.Verb is not null)
+                                {
+                                    <span class="verb-mini">@t.Verb</span>
+                                }
+                                <span class="mono disc-address">@(t.AddressUnknown ? "address worked out when it runs" : Trim(t.Detail))</span>
+                                @ChangeBadge(t.Changes)
+                            }
+                        </div>
+                        @if (link is { } l)
+                        {
+                            var inner = l.Process.Touches.Where(x => x.Kind == "sp").Select(x => x.Title).Distinct().ToList();
+                            <div class="disc-touch disc-next">
+                                <Icon Name="next" Size="13" />
+                                <span>Continues in <a href="@LinkTo(l.Repo, l.Process.Key)"><b>@l.Repo</b> · @l.Process.Name</a></span>
+                                @if (inner.Count > 0)
+                                {
+                                    <span class="flow-meta">which runs <span class="mono">@string.Join(", ", inner.Take(3))</span>@(inner.Count > 3 ? "…" : "")</span>
+                                }
+                            </div>
+                        }
+                    }
+                    @{
+                        var stepSettings = step.Touches.Where(t => t.Kind is "env" or "config").ToList();
+                    }
+                    @if (stepSettings.Count > 0)
+                    {
+                        <div class="disc-touch">
+                            <span class="tk env" title="Values the app reads from its settings: in RepoRunner these are the variables">Settings</span>
+                            @foreach (var t in stepSettings)
+                            {
+                                var set = t.Kind == "config" || KnownSettings is null ? (bool?)null : KnownSettings.Contains(t.Title);
+                                <span class="setting @(set == false ? "missing" : set == true ? "set" : "")"
+                                      title="@(t.Kind == "config" ? "Read from the app's appsettings" : set == true ? $"Set on {EnvName}" : set == false ? $"Not set on {EnvName}" : "")">
+                                    @if (set == true)
+                                    {
+                                        <Icon Name="check" Size="11" />
+                                    }
+                                    else if (set == false)
+                                    {
+                                        <Icon Name="alert" Size="11" />
+                                    }
+                                    @t.Title
+                                </span>
+                            }
+                        </div>
+                    }
+                </li>
+            }
+        </ol>
+        <p class="flow-meta disc-foot">
+            Found by reading the code. Calls whose procedure or address is decided while the app runs show only as far as the code spells them out.
+            To see exactly what happens with real data, record the process on the Recordings tab.
+        </p>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public RepoInfo Repo { get; set; } = null!;
+    [Parameter, EditorRequired] public Discoveries.Entry Entry { get; set; } = null!;
+    /// <summary>Other repos' scans by repo name, to follow a call from this repo into another.</summary>
+    [Parameter] public Dictionary<string, ProcessMap> Others { get; set; } = [];
+    /// <summary>Variable names set for this repo on the current environment; null when the environment is locked.</summary>
+    [Parameter] public HashSet<string>? KnownSettings { get; set; }
+    [Parameter] public string EnvName { get; set; } = "";
+    [Parameter] public string? OpenKey { get; set; }
+    [Parameter] public EventCallback<string?> OnOpen { get; set; }
+    [Parameter] public EventCallback OnRescan { get; set; }
+    [Parameter, EditorRequired] public Func<string, string, string> LinkTo { get; set; } = null!;
+
+    private string search = "";
+    /// <summary>One name per other system: OPSAPI and OpsApiBaseUrl are both OpsApi.</summary>
+    private Dictionary<string, string> names = [];
+    private string area = "";
+
+    private bool Matches(FoundProcess p)
+    {
+        if (search.Trim().Length == 0) return true;
+        var words = search.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var text = string.Join(" ", new[] { p.Name, p.Area, p.Route ?? "" }.Concat(p.Steps.Select(s => s.Title))
+            .Concat(p.Touches.Select(t => t.Title + " " + t.Detail)));
+        return words.All(w => text.Contains(w, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The procedure, system or setting a search found in a process, when the process's name alone did not match.</summary>
+    private string? MatchedTouch(FoundProcess p)
+    {
+        var term = search.Trim();
+        if (term.Length < 3 || p.Name.Contains(term, StringComparison.OrdinalIgnoreCase) || p.Area.Contains(term, StringComparison.OrdinalIgnoreCase)) return null;
+        var hit = p.Touches.FirstOrDefault(t => t.Title.Contains(term, StringComparison.OrdinalIgnoreCase) || (t.Detail?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false));
+        return hit is null ? null : hit.Title.Contains(term, StringComparison.OrdinalIgnoreCase) ? hit.Title : Trim(hit.Detail);
+    }
+
+    private static string KindWord(FoundProcess p) => p.Kind switch { "page" => "Page", "endpoint" => "API", _ => "Job" };
+
+    private string SystemWord(string system) => names.TryGetValue(Plain(system), out var name) ? name : system;
+
+    /// <summary>The other system a call goes to, as named by the code (ESB) or by the setting its address comes from (OpsApiBaseUrl → OpsApi).</summary>
+    private static string RawSystem(Touch t)
+    {
+        if (t.Title.All(c => char.IsUpper(c) || c == '_' || char.IsDigit(c))) return t.Title;
+        if (t.Detail is { } d && d.StartsWith('{') && d.IndexOf('}') is > 1 and var close)
+        {
+            var setting = d[1..close];
+            // {url}, {endpoint}: a value the code works out, not a named setting, so it says nothing about the system.
+            if (char.IsLower(setting[0])) return "Another system";
+            foreach (var suffix in new[] { "BaseUrl", "BaseUri", "BaseAddress", "Url", "Uri", "Endpoint", "Host", "Address" })
+                if (setting.Length > suffix.Length && setting.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return setting[..^suffix.Length];
+            return setting;
+        }
+        if (t.Detail is { } url && Uri.TryCreate(url, UriKind.Absolute, out var uri)) return uri.Host;
+        return "Another system";
+    }
+
+    private string SystemName(Touch t)
+    {
+        var raw = RawSystem(t);
+        return names.TryGetValue(Plain(raw), out var name) ? name : raw;
+    }
+
+    /// <summary>Each system under one name, preferring the one written in mixed case (OpsApi over OPSAPI).</summary>
+    private static Dictionary<string, string> Canonical(ProcessMap map)
+    {
+        var all = map.Processes.SelectMany(p => p.Touches).Where(t => t.Kind == "http").Select(RawSystem)
+            .Concat(map.Processes.SelectMany(p => p.Touches).Where(t => t.Via is not null).Select(t => t.Via!));
+        return all.GroupBy(Plain).ToDictionary(g => g.Key,
+            g => g.OrderByDescending(n => n.Any(char.IsLower) && n.Any(char.IsUpper)).ThenBy(n => n.Length).First());
+    }
+
+    private static List<FoundProcess> UsedElsewhere(ProcessMap map, FoundProcess open, string procedure) =>
+        map.Processes.Where(p => p.Key != open.Key && p.Touches.Any(t => t.Kind == "sp" && t.Title == procedure)).ToList();
+
+    /// <summary>
+    /// The process in another repo a call lands on: the repo is the one the call's system or address setting is
+    /// named after (OPSAPI, OpsApiBaseUrl → OpsApi), the process the endpoint whose route ends like the call's path.
+    /// </summary>
+    private (string Repo, FoundProcess Process)? Follow(Touch t)
+    {
+        foreach (var (name, map) in Others)
+        {
+            var key = Plain(name);
+            var system = Plain(SystemName(t));
+            if (!(system == key || system.Contains(key))) continue;
+            var path = t.Detail ?? "";
+            if (path.StartsWith('{') && path.IndexOf('}') is > 0 and var close) path = path[(close + 1)..];
+            var cut = path.IndexOfAny(['?', '#']);
+            if (cut >= 0) path = path[..cut];
+            var segments = path.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length == 0) continue;
+            FoundProcess? best = null;
+            var bestScore = 0;
+            foreach (var p in map.Processes.Where(p => p.Kind == "endpoint" && p.Route is not null))
+            {
+                var route = p.Route!.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+                // Line the two up from the start of the call's path: OpsApi's route may carry a prefix (api/) the call leaves to its base address.
+                var offset = Enumerable.Range(0, Math.Max(1, route.Length - segments.Length + 1))
+                    .FirstOrDefault(o => o < route.Length && route[o].Equals(segments[0], StringComparison.OrdinalIgnoreCase), -1);
+                if (offset < 0 || route.Length - offset != segments.Length) continue;
+                var score = 0;
+                for (var i = 0; i < segments.Length; i++)
+                {
+                    var (a, b) = (segments[i], route[offset + i]);
+                    var aOpen = a.StartsWith('{') || a == "…";
+                    var bOpen = b.StartsWith('{');
+                    if (!aOpen && !bOpen && a.Equals(b, StringComparison.OrdinalIgnoreCase)) score += 3;
+                    else if (aOpen && bOpen) score += 1;
+                    else { score = -1; break; }
+                }
+                if (score > bestScore) (best, bestScore) = (p, score);
+            }
+            if (best is not null) return (name, best);
+        }
+        return null;
+    }
+
+    private static string Plain(string text) => new string(text.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant()
+        .Replace("baseurl", "").Replace("url", "");
+
+    private static string ShortFile(string file) => System.IO.Path.GetFileName(file);
+
+    private static string Trim(string? text) => text is null ? "" : text.Length <= 110 ? text : text[..109] + "…";
+
+    private static string When(DateTime at) =>
+        at.Date == DateTime.Today ? $"today at {at:HH:mm}" : at.Date == DateTime.Today.AddDays(-1) ? $"yesterday at {at:HH:mm}" : at.ToString("d MMM HH:mm");
+
+    private static RenderFragment ChangeBadge(bool? changes) => __builder =>
+    {
+        if (changes == true)
+        {
+            <span class="badge warn" title="Its name says it saves, updates or deletes something">changes data</span>
+        }
+        else if (changes == false)
+        {
+            <span class="badge" title="Its name says it only looks something up">reads</span>
+        }
+    };
+}

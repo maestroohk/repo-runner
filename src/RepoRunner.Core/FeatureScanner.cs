@@ -92,7 +92,11 @@ public static partial class FeatureScanner
                     {
                         var method = MethodNameRegex().Match(text, m.Index + m.Length);
                         var action = method.Success ? method.Groups[1].Value : "";
-                        var route = Combine(classRoute, m.Groups[2].Value).Replace("[controller]", short_).Replace("[action]", action);
+                        // [ActionName("get-employers")] renames the action in the route; the method keeps its name.
+                        var attributesFrom = Math.Max(text.LastIndexOf('}', m.Index), text.LastIndexOf(';', m.Index)) + 1;
+                        var renamed = ActionNameRegex().Match(text[attributesFrom..(method.Success ? method.Index : m.Index)]);
+                        var routeAction = renamed.Success ? renamed.Groups[1].Value : action;
+                        var route = Combine(classRoute, m.Groups[2].Value).Replace("[controller]", short_).Replace("[action]", routeAction);
                         features.Add(new Feature("endpoint", m.Groups[1].Value.ToUpperInvariant(), $"{short_}.{action}".TrimEnd('.'), route, relative, LineOf(m.Index)));
                     }
                 }
@@ -149,7 +153,7 @@ public static partial class FeatureScanner
     [GeneratedRegex(@"^\s*@page\s+""([^""]+)""", RegexOptions.Multiline)]
     private static partial Regex PageRegex();
 
-    [GeneratedRegex(@"\bclass\s+(\w+)\s*(?:\([^)]*\))?\s*:\s*[^{]*?\b(?:ControllerBase|Controller)\b")]
+    [GeneratedRegex(@"\bclass\s+(\w+)\s*(?:\([^)]*\))?\s*:\s*[^{]*?\b\w*Controller(?:Base)?\b")]
     private static partial Regex ControllerRegex();
 
     [GeneratedRegex(@"\[Route\(\s*""([^""]*)""")]
@@ -160,6 +164,9 @@ public static partial class FeatureScanner
 
     [GeneratedRegex(@"\bpublic\s+[^;{(=]*?\b(\w+)\s*\(")]
     private static partial Regex MethodNameRegex();
+
+    [GeneratedRegex(@"\[ActionName\(\s*""([^""]+)""")]
+    private static partial Regex ActionNameRegex();
 
     [GeneratedRegex(@"\.Map(Get|Post|Put|Delete|Patch)\(\s*""([^""]+)""")]
     private static partial Regex MapRegex();
