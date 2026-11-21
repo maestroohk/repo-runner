@@ -410,16 +410,20 @@
                                 <span class="tab-count">@scan.Features.Count</span>
                             }
                         </button>
-                        <button class="ptab @(tab == "files" ? "active" : "")" @onclick="@(() => ShowTab("files"))">
-                            <Icon Name="file" /> Plaintext files
-                            @if (files.Count > 0)
-                            {
+                        @if (files.Count > 0 || tab == "files")
+                        {
+                            <button class="ptab @(tab == "files" ? "active" : "")" title="Files in the repo that hold settings in plain text" @onclick="@(() => ShowTab("files"))">
+                                <Icon Name="file" /> Plain-text settings
                                 <span class="tab-count warn">@files.Count</span>
-                            }
-                        </button>
+                            </button>
+                        }
                     </div>
 
                     <div class="panel-body">
+                        @if (TabHint(tab) is { } hint)
+                        {
+                            <p class="tab-hint">@hint</p>
+                        }
                         @if (tab == "found")
                         {
                             <ProcessesView Repo="repo" Entry="Found.For(repo)" Others="OtherMaps()" EnvName="@envName"
@@ -3962,6 +3966,18 @@
         Found.Loaded(repos.Where(r => r.Id != repo?.Id));
 
     private long seenFound = -1;
+
+    /// <summary>What a tab is for, in one sentence anyone can follow.</summary>
+    private string? TabHint(string key) => key switch
+    {
+        "vars" => $"The settings {repo?.Name} is given when RepoRunner starts it (addresses, user names, keys), kept encrypted. Pick the environment at the top to see its values.",
+        "output" => "What the app prints while it runs. Errors show here first.",
+        "processes" => "Record yourself using the app and RepoRunner keeps every step, every call to another system and every answer, so you can look back, compare two runs or find where it went wrong. Failures are kept by themselves.",
+        "flow" => "What the running app is doing right now, drawn as a map of who calls whom. Click a request to replay it step by step.",
+        "features" => "For developers: follow a page or an API through the code, method by method.",
+        "files" => "These files hold settings in plain text. They may override what RepoRunner gives the app, and anyone with the folder can read them.",
+        _ => null,
+    };
 
     private void ShowTab(string key)
     {

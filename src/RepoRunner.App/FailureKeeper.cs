@@ -46,16 +46,16 @@ public static partial class FlowRules
             var name = RequestShape.Intent(body?.Request) ?? LastSegment(step);
             var code = step.StatusCode;
             if (code is null && step.Status == "Error") return $"{name} got no answer";
-            if (code >= 500) return $"{name} failed with {code}";
+            if (code >= 500) return $"{name} failed on the other system (error {code})";
             if (code >= 400)
             {
                 if (code == 404 && SaysNothingFound(body?.Response)) continue;
-                return $"{name} was refused with {code}";
+                return $"{name} was refused (error {code}: {code switch { 401 or 403 => "not allowed", 404 => "not found", _ => "rejected" }})";
             }
             if (ReportedError(body?.Response) is { } error) return $"{name} reported {error}";
         }
         if (flow.Errors.FirstOrDefault(e => e.Unhandled) is { } unhandled)
-            return $"{unhandled.Type.Split('.').Last()} was not handled" + (unhandled.Origin is { File: { } file } origin ? $" at {Path.GetFileName(file)}:{origin.Line}" : "");
+            return $"The app crashed with {unhandled.Type.Split('.').Last()}" + (unhandled.Origin is { File: { } file } origin ? $" in {Path.GetFileName(file)}, line {origin.Line}" : "");
         if (flow.Root is { Category: "request" } root && root.StatusCode >= 500)
             return $"{root.Tag("http.request.method", "http.method")} {root.Tag("url.path", "http.target")} returned {root.StatusCode}";
         return null;

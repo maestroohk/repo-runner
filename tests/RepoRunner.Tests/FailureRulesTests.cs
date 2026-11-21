@@ -44,8 +44,8 @@ public class FailureRulesTests
     [Fact]
     public void Calls_that_failed_are_named_by_their_command()
     {
-        Assert.Equal("RCU_Provision_Save failed with 500", FlowRules.Failure(Click((200, Command("X_Get"), "{}"), (500, Command("RCU_Provision_Save"), "oops"))));
-        Assert.Equal("X_Get was refused with 401", FlowRules.Failure(Click((401, Command("X_Get"), "{}"))));
+        Assert.Equal("RCU_Provision_Save failed on the other system (error 500)", FlowRules.Failure(Click((200, Command("X_Get"), "{}"), (500, Command("RCU_Provision_Save"), "oops"))));
+        Assert.Equal("X_Get was refused (error 401: not allowed)", FlowRules.Failure(Click((401, Command("X_Get"), "{}"))));
         Assert.Equal("ExecuteQueryFormated got no answer", FlowRules.Failure(Click((null, null, null))));
         Assert.Equal("Member_Save reported error 7: Invalid NIN", FlowRules.Failure(Click((200, Command("Member_Save"), """{"errorCode":"7","errorDescription":"Invalid NIN"}"""))));
     }
@@ -63,6 +63,6 @@ public class FailureRulesTests
             At = DateTime.UtcNow, Type = "System.NullReferenceException", Message = "x", Unhandled = true,
             Frames = [new FlowFrame("App.Page.Save", @"C:\src\Page.razor.cs", 42)],
         });
-        Assert.Equal("NullReferenceException was not handled at Page.razor.cs:42", FlowRules.Failure(unhandled));
+        Assert.Equal("The app crashed with NullReferenceException in Page.razor.cs, line 42", FlowRules.Failure(unhandled));
     }
 }
