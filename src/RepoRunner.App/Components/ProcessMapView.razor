@@ -1,0 +1,532 @@
+@* A process drawn as a map: who and what takes part, in lanes from the person to the data, with each step played
+   as packets of information moving along the connections and the answers coming back. *@
+@implements IDisposable
+
+<div class="pmap @(fullscreen ? "full" : "")">
+    <div class="pmap-bar">
+        <div class="pmap-controls">
+            <button class="icon-btn" title="Previous step" disabled="@(current <= 0)" @onclick="Prev"><Icon Name="prev" Size="15" /></button>
+            @if (playing)
+            {
+                <button class="btn small primary" title="Pause" @onclick="Pause"><Icon Name="pause" Size="12" /> Pause</button>
+            }
+            else
+            {
+                <button class="btn small primary" title="Play every step in order" @onclick="PlayAll"><Icon Name="play" Size="11" /> @(current < 0 ? "Play the whole process" : "Play from here")</button>
+            }
+            <button class="icon-btn" title="Next step" disabled="@(current >= Process.Steps.Count - 1)" @onclick="Next"><Icon Name="next" Size="15" /></button>
+            <button class="icon-btn" title="Play this step again" disabled="@(current < 0)" @onclick="Replay"><Icon Name="refresh" Size="14" /></button>
+            <span class="pmap-sep"></span>
+            <span class="flow-meta">Speed</span>
+            <div class="seg">
+                @foreach (var (label, value) in new[] { ("Slow", 0.5), ("Normal", 1.0), ("Fast", 2.0) })
+                {
+                    <button class="seg-opt @(speed == value ? "active" : "")" @onclick="() => SetSpeed(value)">@label</button>
+                }
+            </div>
+        </div>
+        <span class="spacer"></span>
+        <div class="pmap-legend">
+            <span><i class="dot read"></i> looks up</span>
+            <span><i class="dot change"></i> changes data</span>
+            <span><i class="dot reply"></i> answer</span>
+            <span><i class="dot setting"></i> setting</span>
+        </div>
+        <button class="icon-btn" title="@(fullscreen ? "Back to the page" : "Use the whole window")" @onclick="() => fullscreen = !fullscreen"><Icon Name="expand" Size="14" /></button>
+    </div>
+
+    <div class="pmap-steps">
+        <button class="pmap-step @(current < 0 ? "active" : "")" @onclick="() => Show(-1)">Everything</button>
+        @for (var i = 0; i < Process.Steps.Count; i++)
+        {
+            var index = i;
+            var step = Process.Steps[i];
+            <button class="pmap-step @(current == index ? "active" : "") @(StepChanges(step) ? "changes" : "")" title="@step.Title" @onclick="() => Show(index)">
+                <b>@(index + 1)</b> @Short(step.Title, 34)
+            </button>
+        }
+    </div>
+
+    <div class="pmap-scroll">
+    <div class="pmap-canvas" style="aspect-ratio: @W / @plan.Height">
+        @* The map itself: lanes, nodes and every connection the process ever uses. *@
+        <svg class="pmap-svg" viewBox="0 0 @W @plan.Height" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Map of @Process.Name">
+            <defs>
+                <filter id="pmap-glow" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur stdDeviation="3" result="b" />
+                    <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+                </filter>
+                <marker id="pmap-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" class="pmap-arrowhead" />
+                </marker>
+            </defs>
+            @foreach (var lane in plan.Lanes)
+            {
+                <rect class="pmap-lane" x="@F(lane.X - LaneWidth / 2)" y="14" width="@LaneWidth" height="@F(plan.Height - 28)" rx="14" />
+                @Svg($" class=\"pmap-lane-title\" x=\"{F(lane.X)}\" y=\"36\" text-anchor=\"middle\"", lane.Title)
+            }
+            @foreach (var edge in plan.Edges)
+            {
+                var hot = activeEdges.Contains(edge.Key);
+                var dim = focus is not null && edge.From != focus && edge.To != focus;
+                <path class="pmap-edge @(hot ? "hot" : "") @(hot && edge.Changes ? "changes" : "") @(dim ? "dim" : "")" d="@edge.Path" marker-end="url(#pmap-arrow)" />
+            }
+            @foreach (var node in plan.Nodes.Values)
+            {
+                var hot = activeNodes.Contains(node.Key);
+                var dim = focus is not null && node.Key != focus && !plan.Edges.Any(e => (e.From == focus && e.To == node.Key) || (e.To == focus && e.From == node.Key));
+                <g class="pmap-node kind-@node.Kind @(hot ? "hot" : "") @(dim ? "dim" : "") @(focus == node.Key ? "focus" : "")" transform="translate(@F(node.X - node.W / 2),@F(node.Y - NodeH / 2))"
+                   @onclick="() => Focus(node.Key)">
+                    <title>@node.Tooltip</title>
+                    <rect width="@F(node.W)" height="@NodeH" rx="12" />
+                    @Svg($" class=\"pmap-node-kind\" x=\"14\" y=\"20\"", node.KindLabel)
+                    @Svg($" class=\"pmap-node-name\" x=\"14\" y=\"39\"", Short(node.Name, node.Kind == "sp" ? 26 : 22))
+                    @if (node.Badge is not null)
+                    {
+                        @Svg($" class=\"pmap-node-badge\" x=\"{F(node.W - 12)}\" y=\"20\" text-anchor=\"end\"", node.Badge)
+                    }
+                </g>
+            }
+        </svg>
+
+        @* The moving part, drawn on top. Re-created for every play, so its clock starts again at zero. *@
+        <svg class="pmap-svg pmap-anim" viewBox="0 0 @W @plan.Height" preserveAspectRatio="xMidYMid meet" @key="playKey" aria-hidden="true">
+            @foreach (var hop in hops)
+            {
+                var begin = $"{F(hop.Begin / speed)}s";
+                var dur = $"{F(hop.Duration / speed)}s";
+                <g class="pmap-packet @hop.Kind" opacity="0" filter="url(#pmap-glow)">
+                    <circle r="@(hop.Kind == "reply" ? 5 : 7)" />
+                    @if (hop.Tag is not null)
+                    {
+                        @Svg($" y=\"-12\" text-anchor=\"middle\"", Short(hop.Tag, 30))
+                    }
+                    <animateMotion path="@hop.Path" begin="@begin" dur="@dur" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.45 0 0.25 1" />
+                    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.85;1" begin="@begin" dur="@dur" fill="freeze" />
+                </g>
+                @if (plan.Nodes.TryGetValue(hop.To, out var target))
+                {
+                    <rect class="pmap-pulse @hop.Kind" x="@F(target.X - target.W / 2)" y="@F(target.Y - NodeH / 2)" width="@F(target.W)" height="@NodeH" rx="12" opacity="0">
+                        <animate attributeName="opacity" values="0;0.9;0" begin="@($"{F((hop.Begin + hop.Duration * 0.85) / speed)}s")" dur="@($"{F(0.7 / speed)}s")" fill="freeze" />
+                        <animate attributeName="stroke-width" values="2;12" begin="@($"{F((hop.Begin + hop.Duration * 0.85) / speed)}s")" dur="@($"{F(0.7 / speed)}s")" fill="freeze" />
+                    </rect>
+                }
+            }
+        </svg>
+    </div>
+
+    </div>
+    <div class="pmap-story" @key="playKey">
+        @if (current < 0 && !playing)
+        {
+            <p class="flow-meta">
+                This is everything @Process.Name touches. Press <b>Play the whole process</b> to watch the information move step by step,
+                or pick a step above. Click any box to see only its connections.
+            </p>
+        }
+        else
+        {
+            <ol>
+                @foreach (var hop in hops.Where(h => h.Sentence is not null))
+                {
+                    <li class="pmap-line k-@hop.Kind" style="animation-delay: @($"{F(hop.Begin / speed)}s")">@hop.Sentence</li>
+                }
+            </ol>
+        }
+        @if (focus is not null && plan.Nodes.TryGetValue(focus, out var focused))
+        {
+            var using_ = Process.Steps.Select((s, i) => (s, i)).Where(x => StepUses(x.s, focused)).ToList();
+            <div class="pmap-focus">
+                <b>@focused.Name</b> is used in @using_.Count step@(using_.Count == 1 ? "" : "s"):
+                @foreach (var (s, i) in using_)
+                {
+                    <button class="pmap-step small" @onclick="() => Show(i)"><b>@(i + 1)</b> @Short(s.Title, 40)</button>
+                }
+                <button class="btn small" @onclick="() => Focus(null)">Show everything</button>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public FoundProcess Process { get; set; } = null!;
+    [Parameter, EditorRequired] public string AppName { get; set; } = "";
+    /// <summary>The name of the other system a call goes to, as the page shows it.</summary>
+    [Parameter, EditorRequired] public Func<Touch, string> SystemOf { get; set; } = null!;
+    /// <summary>Where a call lands in another of your repos, with what it runs there.</summary>
+    [Parameter] public Func<Touch, (string Repo, FoundProcess Process)?>? Follow { get; set; }
+
+    private const double W = 1180;
+    private const double NodeH = 52;
+    private const double LaneWidth = 236;
+
+    private sealed record Lane(double X, string Title);
+    private sealed class Node
+    {
+        public required string Key { get; init; }
+        public required string Kind { get; init; } // person | settings | app | system | sp | db
+        public required string Name { get; init; }
+        public required string KindLabel { get; init; }
+        public string? Badge { get; set; }
+        public string Tooltip { get; set; } = "";
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double W { get; set; } = 196;
+    }
+    private sealed record Edge(string Key, string From, string To, string Path, bool Changes);
+    private sealed class Layout
+    {
+        public List<Lane> Lanes { get; } = [];
+        public Dictionary<string, Node> Nodes { get; } = [];
+        public List<Edge> Edges { get; } = [];
+        public double Height { get; set; }
+    }
+    /// <summary>One movement of information: a packet from one box to the next, and what it means in words.</summary>
+    private sealed record Hop(string From, string To, string Path, string Kind, double Begin, double Duration, string? Tag, string? Sentence);
+
+    private Layout plan = new();
+    private List<Hop> hops = [];
+    private HashSet<string> activeEdges = [];
+    private HashSet<string> activeNodes = [];
+    private FoundProcess? builtFor;
+    private int current = -1;
+    private bool playing;
+    private double speed = 1;
+    private int playKey;
+    private string? focus;
+    private bool fullscreen;
+    private Timer? advance;
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(builtFor, Process)) return;
+        builtFor = Process;
+        current = -1;
+        playing = false;
+        focus = null;
+        plan = BuildLayout();
+        ShowEverything();
+    }
+
+    // ---------- laying out ----------
+
+    private static string Key(string kind, string name) => kind + ":" + name;
+
+    private Layout BuildLayout()
+    {
+        var map = new Layout();
+        double[] xs = [130, 420, 730, 1040];
+        string[] titles = ["Who starts it", AppName, "Other systems", "Data"];
+        for (var i = 0; i < xs.Length; i++) map.Lanes.Add(new Lane(xs[i], titles[i]));
+
+        var touches = Process.Touches.ToList();
+        var settings = touches.Where(t => t.Kind is "env" or "config").Select(t => t.Title).Distinct().ToList();
+
+        // Systems in the order the process first reaches them; procedures under the system that runs them.
+        var systems = new List<string>();
+        void AddSystem(string name) { if (!systems.Contains(name)) systems.Add(name); }
+        var data = new List<(string Name, string? Owner, bool Changes)>();
+        void AddData(string name, string? owner, bool changes) { if (!data.Any(d => d.Name == name)) data.Add((name, owner, changes)); }
+        foreach (var step in Process.Steps)
+            foreach (var t in step.Touches)
+            {
+                if (t.Kind == "http")
+                {
+                    var system = SystemOf(t);
+                    AddSystem(system);
+                    if (Follow?.Invoke(t) is { } link)
+                        foreach (var inner in link.Process.Touches.Where(x => x.Kind == "sp").DistinctBy(x => x.Title).Take(4))
+                            AddData(inner.Title, system, inner.Changes == true);
+                }
+                else if (t.Kind == "sp")
+                {
+                    if (t.Via is { } via) AddSystem(Systems(via));
+                    AddData(t.Title, t.Via is null ? null : Systems(t.Via), t.Changes == true);
+                }
+                else if (t.Kind == "db") AddData("Database", null, false);
+            }
+        // Data ordered by the system that owns it, so the lines do not cross more than they must.
+        data = data.OrderBy(d => d.Owner is null ? -1 : systems.IndexOf(d.Owner)).ToList();
+        var shownData = data.Take(14).ToList();
+        var hidden = data.Count - shownData.Count;
+
+        var rows = Math.Max(3, Math.Max(systems.Count, shownData.Count + (hidden > 0 ? 1 : 0)));
+        const double top = 70, rowH = 70;
+        map.Height = top + rows * rowH + 20;
+        double RowY(int i, int count) => top + (rows * rowH) * (i + 0.5) / Math.Max(1, count);
+
+        var middle = top + rows * rowH / 2;
+        Add(map, new Node { Key = "person", Kind = "person", Name = Process.Kind == "endpoint" ? "Another app" : "A person", KindLabel = Process.Kind == "endpoint" ? "CALLER" : "USER", X = xs[0], Y = settings.Count > 0 ? middle - 46 : middle, W = 178,
+            Tooltip = Process.Kind == "endpoint" ? "Another app calls this API" : "Someone using the page in a browser" });
+        if (settings.Count > 0)
+            Add(map, new Node { Key = "settings", Kind = "settings", Name = $"{settings.Count} setting{(settings.Count == 1 ? "" : "s")}", KindLabel = "SETTINGS", X = xs[0], Y = middle + 46, W = 178,
+                Tooltip = "Read when needed: " + string.Join(", ", settings) });
+        Add(map, new Node { Key = "app", Kind = "app", Name = Process.Name, KindLabel = Process.Kind switch { "page" => "PAGE", "endpoint" => "API", _ => "JOB" }, X = xs[1], Y = middle, W = 214,
+            Tooltip = $"{Process.Area} · {Process.Route}" });
+        for (var i = 0; i < systems.Count; i++)
+        {
+            var calls = touches.Count(t => t.Kind == "http" && SystemOf(t) == systems[i]);
+            Add(map, new Node { Key = Key("system", systems[i]), Kind = "system", Name = systems[i], KindLabel = "SYSTEM", X = xs[2], Y = RowY(i, systems.Count),
+                Badge = calls > 0 ? $"{calls} call{(calls == 1 ? "" : "s")}" : null, Tooltip = systems[i] });
+        }
+        for (var i = 0; i < shownData.Count; i++)
+        {
+            var d = shownData[i];
+            Add(map, new Node { Key = Key("sp", d.Name), Kind = d.Name == "Database" ? "db" : "sp", Name = d.Name, KindLabel = d.Name == "Database" ? "DATABASE" : "PROCEDURE",
+                X = xs[3], Y = RowY(i, shownData.Count + (hidden > 0 ? 1 : 0)), W = 214, Badge = d.Changes ? "changes" : null,
+                Tooltip = d.Owner is null ? $"{d.Name}, in {AppName}'s database" : $"{d.Name}, run by {d.Owner}" });
+        }
+        if (hidden > 0)
+            Add(map, new Node { Key = "more", Kind = "db", Name = $"and {hidden} more", KindLabel = "PROCEDURES", X = xs[3], Y = RowY(shownData.Count, shownData.Count + 1), W = 214, Tooltip = string.Join(", ", data.Skip(14).Select(d => d.Name)) });
+
+        // Every connection the process ever uses.
+        void Connect(string from, string to, bool changes)
+        {
+            if (!map.Nodes.ContainsKey(from) || !map.Nodes.ContainsKey(to)) return;
+            var key = from + ">" + to;
+            if (map.Edges.Any(e => e.Key == key)) return;
+            map.Edges.Add(new Edge(key, from, to, Curve(map.Nodes[from], map.Nodes[to]), changes));
+        }
+        Connect("person", "app", false);
+        if (settings.Count > 0) Connect("settings", "app", false);
+        foreach (var s in systems) Connect("app", Key("system", s), touches.Any(t => t.Kind == "http" && SystemOf(t) == s && t.Changes == true));
+        foreach (var d in shownData) Connect(d.Owner is null ? "app" : Key("system", d.Owner), Key("sp", d.Name), d.Changes);
+        if (hidden > 0) Connect("app", "more", false);
+        return map;
+    }
+
+    private static void Add(Layout map, Node node) => map.Nodes[node.Key] = node;
+
+    private static string Curve(Node a, Node b)
+    {
+        var forward = b.X >= a.X;
+        var x1 = a.X + (forward ? a.W / 2 : -a.W / 2);
+        var x2 = b.X + (forward ? -b.W / 2 : b.W / 2);
+        var bend = Math.Max(40, Math.Abs(x2 - x1) * 0.45) * (forward ? 1 : -1);
+        if (a.Kind == "settings" || a.Kind == "person")
+        {
+            x1 = a.X + a.W / 2;
+            x2 = b.X - b.W / 2;
+            bend = Math.Max(40, Math.Abs(x2 - x1) * 0.45);
+        }
+        return $"M{F(x1)},{F(a.Y)} C{F(x1 + bend)},{F(a.Y)} {F(x2 - bend)},{F(b.Y)} {F(x2)},{F(b.Y)}";
+    }
+
+    private static string Reverse(Node a, Node b) => Curve(a, b) is var path ? ReversePath(path) : "";
+
+    /// <summary>The same cubic curve run backwards, for an answer travelling home.</summary>
+    private static string ReversePath(string path)
+    {
+        var parts = path.Replace("M", "").Replace("C", ",").Split([',', ' '], StringSplitOptions.RemoveEmptyEntries);
+        // M x1,y1 C c1x,c1y c2x,c2y x2,y2
+        return $"M{parts[6]},{parts[7]} C{parts[4]},{parts[5]} {parts[2]},{parts[3]} {parts[0]},{parts[1]}";
+    }
+
+    // ---------- playing ----------
+
+    private string Systems(string raw) => SystemOf(new Touch("http", raw, null, null, "", 0));
+
+    /// <summary>The movements of one step, timed one after another, each with a sentence anyone can follow.</summary>
+    private List<Hop> HopsOf(ProcessStep step, double start)
+    {
+        var list = new List<Hop>();
+        var t = start;
+        void Go(string from, string to, string kind, string? tag, string? sentence, double duration = 0.9)
+        {
+            if (!plan.Nodes.TryGetValue(from, out var a) || !plan.Nodes.TryGetValue(to, out var b)) return;
+            var path = a.X <= b.X ? Curve(a, b) : ReversePath(Curve(b, a));
+            list.Add(new Hop(from, to, path, kind, t, duration, tag, sentence));
+            t += duration * 0.92;
+        }
+        void Back(string from, string to, string? sentence)
+        {
+            if (!plan.Nodes.TryGetValue(from, out var a) || !plan.Nodes.TryGetValue(to, out var b)) return;
+            list.Add(new Hop(from, to, ReversePath(Curve(b, a)), "reply", t, 0.6, null, sentence));
+            t += 0.55;
+        }
+
+        var person = Process.Kind == "endpoint" ? "The calling app" : "You";
+        var what = step.Title.Contains(':') ? step.Title[(step.Title.IndexOf(':') + 1)..].Trim() : step.Title;
+        Go("person", "app", "read", Short(what, 28),
+            Process.Kind == "endpoint" ? $"{person} calls {Process.Name}." : Action(what));
+
+        var settings = step.Touches.Where(x => x.Kind is "env" or "config").Select(x => x.Title).Distinct().ToList();
+        if (settings.Count > 0)
+            Go("settings", "app", "setting", settings.Count == 1 ? settings[0] : $"{settings.Count} settings",
+                $"{AppName} reads {(settings.Count == 1 ? "the setting" : "the settings")} {string.Join(", ", settings.Take(4))}{(settings.Count > 4 ? "…" : "")}.", 0.7);
+
+        foreach (var touch in step.Touches)
+        {
+            var kind = touch.Changes == true ? "change" : "read";
+            var verb = touch.Changes == true ? " to change data" : touch.Changes == false ? " to look something up" : "";
+            switch (touch.Kind)
+            {
+                case "http":
+                {
+                    var system = SystemOf(touch);
+                    var node = Key("system", system);
+                    Go("app", node, kind, ShortAddress(touch), $"{AppName} calls {system}{verb}: {ShortAddress(touch) ?? "an address worked out while it runs"}.");
+                    if (Follow?.Invoke(touch) is { } link)
+                        foreach (var inner in link.Process.Touches.Where(x => x.Kind == "sp").DistinctBy(x => x.Title).Take(4))
+                        {
+                            Go(node, Key("sp", inner.Title), inner.Changes == true ? "change" : "read", inner.Title,
+                                $"Inside {link.Repo} ({link.Process.Name}), {system} runs {inner.Title}.", 0.75);
+                            Back(Key("sp", inner.Title), node, null);
+                        }
+                    Back(node, "app", $"{system} answers.");
+                    break;
+                }
+                case "sp" when touch.Via is { } via:
+                {
+                    var system = Key("system", Systems(via));
+                    Go("app", system, kind, touch.Title, $"{AppName} asks {Systems(via)} to run {touch.Title}{verb}.");
+                    Go(system, Key("sp", touch.Title), kind, null, null, 0.7);
+                    Back(Key("sp", touch.Title), system, null);
+                    Back(system, "app", $"{Systems(via)} passes the result back.");
+                    break;
+                }
+                case "sp":
+                    Go("app", Key("sp", touch.Title), kind, touch.Title, $"{AppName} runs {touch.Title} in its database{verb}.");
+                    Back(Key("sp", touch.Title), "app", null);
+                    break;
+                case "db":
+                    Go("app", Key("sp", "Database"), "read", "query", $"{AppName} runs a query it is given at run time ({touch.Detail}).");
+                    Back(Key("sp", "Database"), "app", null);
+                    break;
+            }
+        }
+        Back("app", "person", Process.Kind == "endpoint" ? $"{Process.Name} sends its answer back to the caller." : $"{Process.Name} shows you the result.");
+        return list;
+    }
+
+    private void ShowEverything()
+    {
+        hops = [];
+        activeEdges = plan.Edges.Select(e => e.Key).ToHashSet();
+        activeNodes = plan.Nodes.Keys.ToHashSet();
+        playKey++;
+    }
+
+    private void Show(int index)
+    {
+        StopTimer();
+        playing = false;
+        current = index;
+        if (index < 0) { ShowEverything(); return; }
+        PlayStep(index);
+    }
+
+    private void PlayStep(int index)
+    {
+        current = index;
+        hops = HopsOf(Process.Steps[index], 0.2);
+        activeNodes = hops.SelectMany(h => new[] { h.From, h.To }).ToHashSet();
+        activeEdges = plan.Edges.Where(e => activeNodes.Contains(e.From) && activeNodes.Contains(e.To)
+            && hops.Any(h => (h.From == e.From && h.To == e.To) || (h.From == e.To && h.To == e.From))).Select(e => e.Key).ToHashSet();
+        playKey++;
+    }
+
+    private double StepLength => hops.Count == 0 ? 0 : hops.Max(h => h.Begin + h.Duration);
+
+    private void PlayAll()
+    {
+        playing = true;
+        PlayStep(Math.Max(0, current));
+        Schedule();
+    }
+
+    private void Schedule()
+    {
+        StopTimer();
+        var wait = TimeSpan.FromSeconds(StepLength / speed + 1.4);
+        advance = new Timer(_ => InvokeAsync(() =>
+        {
+            if (!playing) return;
+            if (current >= Process.Steps.Count - 1) { playing = false; StateHasChanged(); return; }
+            PlayStep(current + 1);
+            Schedule();
+            StateHasChanged();
+        }), null, wait, Timeout.InfiniteTimeSpan);
+    }
+
+    private void Pause()
+    {
+        playing = false;
+        StopTimer();
+    }
+
+    private void Prev() => Show(Math.Max(0, current - 1));
+    private void Next() => Show(Math.Min(Process.Steps.Count - 1, current + 1));
+    private void Replay() { if (current >= 0) { StopTimer(); playing = false; PlayStep(current); } }
+
+    private void SetSpeed(double value)
+    {
+        speed = value;
+        if (current >= 0) PlayStep(current);
+        if (playing) Schedule();
+    }
+
+    private void Focus(string? key) => focus = focus == key ? null : key;
+
+    private bool StepUses(ProcessStep step, Node node) => node.Kind switch
+    {
+        "person" or "app" => true,
+        "settings" => step.Touches.Any(t => t.Kind is "env" or "config"),
+        "system" => step.Touches.Any(t => t.Kind == "http" && SystemOf(t) == node.Name || t.Via is { } v && Systems(v) == node.Name),
+        _ => step.Touches.Any(t => t.Kind == "sp" && t.Title == node.Name)
+             || step.Touches.Any(t => t.Kind == "http" && Follow?.Invoke(t) is { } l && l.Process.Touches.Any(x => x.Kind == "sp" && x.Title == node.Name))
+             || node.Kind == "db" && step.Touches.Any(t => t.Kind == "db"),
+    };
+
+    private static bool StepChanges(ProcessStep step) => step.Touches.Any(t => t.Changes == true);
+
+    private void StopTimer()
+    {
+        advance?.Dispose();
+        advance = null;
+    }
+
+    public void Dispose() => StopTimer();
+
+    // ---------- words ----------
+
+    /// <summary>What the person did, from the handler's name: "resend clicked" → You press “Resend”.</summary>
+    private string Action(string what)
+    {
+        var w = what.Trim();
+        if (w.StartsWith("when", StringComparison.OrdinalIgnoreCase) || w.StartsWith("right after", StringComparison.OrdinalIgnoreCase))
+            return $"{Cap(w)}, {AppName} gets to work.";
+        string Rest(params string[] endings)
+        {
+            foreach (var e in endings)
+                if (w.EndsWith(" " + e, StringComparison.OrdinalIgnoreCase)) return Cap(w[..^(e.Length + 1)]);
+            return Cap(w);
+        }
+        if (w.EndsWith(" clicked", StringComparison.OrdinalIgnoreCase) || w.EndsWith(" click", StringComparison.OrdinalIgnoreCase) || w.EndsWith(" pressed", StringComparison.OrdinalIgnoreCase))
+            return $"You press “{Rest("clicked", "click", "pressed")}”.";
+        if (w.EndsWith(" key down", StringComparison.OrdinalIgnoreCase) || w.EndsWith(" key up", StringComparison.OrdinalIgnoreCase) || w.EndsWith(" input", StringComparison.OrdinalIgnoreCase) || w.EndsWith(" typed", StringComparison.OrdinalIgnoreCase))
+            return $"You type in “{Rest("key down", "key up", "input", "typed")}”.";
+        if (w.EndsWith(" changed", StringComparison.OrdinalIgnoreCase) || w.EndsWith(" selected", StringComparison.OrdinalIgnoreCase))
+            return $"You pick a different “{Rest("changed", "selected")}”.";
+        return $"You choose “{Cap(w)}”.";
+    }
+
+    private static string? ShortAddress(Touch t)
+    {
+        if (t.Detail is null || t.AddressUnknown) return null;
+        var d = t.Detail;
+        if (d.StartsWith('{') && d.IndexOf('}') is > 0 and var close) d = d[(close + 1)..];
+        var cut = d.IndexOf('?');
+        if (cut > 0) d = d[..cut];
+        return d.Trim('/');
+    }
+
+    private static string Short(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
+    private static string Cap(string s) => s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s[1..];
+    private static string Lower(string s) => s.Length == 0 ? s : char.ToLowerInvariant(s[0]) + s[1..];
+    /// <summary>An SVG text element (Razor keeps the &lt;text&gt; tag for itself).</summary>
+    private static MarkupString Svg(string attributes, string content) =>
+        new($"<text{attributes}>{System.Net.WebUtility.HtmlEncode(content)}</text>");
+
+    private static string F(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+}

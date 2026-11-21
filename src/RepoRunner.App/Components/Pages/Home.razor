@@ -3905,6 +3905,7 @@
         var signIns = attempts.Count(a => a.Allowed);
         var recorded = hits.Count(h => h.Source is "recording" or "similar");
         var read = hits.Count(h => h.Source == "read");
+        var local = hits.Count(h => h.Source == "local");
         var kept = hits.Count(h => h.Source != "read" && CallSafety.Writes(h.Method, h.Label));
         var standIn = hits.Count(h => h.Source == "synthetic");
         <div class="sandbox-facts">
@@ -3922,6 +3923,10 @@
             }
             <span class="fact" title="Lookups answered by the real server: reading only, nothing changed">Looked up <b>@read</b></span>
             <span class="fact" title="Calls that would save, approve, send or delete. RepoRunner answered them; nothing was sent.">Changes held back <b>@kept</b></span>
+            @if (local > 0)
+            {
+                <span class="fact" title="Calls answered by another of your apps running in the sandbox on this machine">Answered locally <b>@local</b></span>
+            }
             <span class="fact" title="Calls answered with what the real service said during one of your recordings">From recordings <b>@recorded</b></span>
             <span class="fact" title="Calls no recording covers. Changes get “accepted”, lookups get “nothing found”. Nothing is saved.">Stand-in answers <b>@standIn</b></span>
             <span class="fact" title="Connections the app tried to open to other machines. Each was refused before anything was sent.">Connections refused <b class="@(refused.Count > 0 ? "warn-text" : "")">@refused.Count</b></span>
@@ -3953,6 +3958,7 @@
     private static string SourceWord(string source) => source switch
     {
         "read" => "looked up on the real server",
+        "local" => "answered by your app running here",
         "recording" => "recorded answer",
         "similar" => "recorded answer to a similar call",
         _ => "stand-in answer",

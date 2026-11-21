@@ -160,12 +160,21 @@ public sealed partial class SandboxServer : IAsyncDisposable
         var exactKey = ExactKey(authority, method, pathAndQuery, body);
         string? problem = null;
         Recorded? real = null;
-        if (ReadThrough && !CallSafety.Writes(method, label))
+        // Your own app running in the sandbox here (a local OpsApi) answers first: it is fenced in too, so
+        // whatever it is asked, changes included, goes no further than this machine.
+        string? into = null;
+        if (MirrorTo?.Invoke(method, pathAndQuery) is { } local && local.IsLoopback)
+        {
+            into = local.GetLeftPart(UriPartial.Authority);
+            (real, problem) = await AskLocal(local, method, body, context.Request);
+            if (real is not null) source = "local";
+        }
+        if (real is null && ReadThrough && !CallSafety.Writes(method, label))
             (real, problem) = await ReadReal(scheme, authority, pathAndQuery, method, body, context.Request);
         if (real is not null)
         {
             answer = real;
-            source = "read";
+            if (source != "local") source = "read";
         }
         else if (_exact.TryGetValue(exactKey, out var list))
         {
@@ -204,12 +213,6 @@ public sealed partial class SandboxServer : IAsyncDisposable
                 ? new { errorCode = "0", errorDescription = "Accepted by the RepoRunner sandbox. Nothing was saved or sent.", sandbox = true }
                 : new { errorCode = "100", errorDescription = "No data found. The RepoRunner sandbox has no recorded answer for this call.", sandbox = true });
         }
-        string? into = null;
-        if (MirrorTo?.Invoke(method, pathAndQuery) is { } copyTo && copyTo.IsLoopback)
-        {
-            into = copyTo.GetLeftPart(UriPartial.Authority);
-            _ = PassCopy(copyTo, method, body, context.Request.ContentType, context.Request.Headers);
-        }
         lock (_hits) _hits.Add(new Hit(DateTime.Now, method, authority, label, source, status, answer?.From, into, problem));
     }
 
@@ -237,23 +240,29 @@ public sealed partial class SandboxServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends the copy with the caller's trace context, so the other app's trace joins this one. Only to this machine
-    /// (checked by the caller); what comes back is ignored.
+    /// Asks your app running here, with the caller's trace context so its trace joins this one. Only to this machine
+    /// (checked by the caller).
     /// </summary>
-    private static async Task PassCopy(Uri target, string method, string body, string? contentType, IHeaderDictionary headers)
+    private static async Task<(Recorded?, string?)> AskLocal(Uri target, string method, string body, HttpRequest incoming)
     {
         try
         {
             using var request = new HttpRequestMessage(new HttpMethod(method), target);
             if (body.Length > 0 || method is "POST" or "PUT" or "PATCH")
                 request.Content = new StringContent(body, System.Text.Encoding.UTF8);
-            if (contentType is not null && request.Content is not null)
-                request.Content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(contentType);
-            foreach (var name in new[] { "traceparent", "tracestate", "Authorization", "Accept" })
-                if (headers.TryGetValue(name, out var value)) request.Headers.TryAddWithoutValidation(name, (IEnumerable<string>)value);
+            if (incoming.ContentType is { } type && request.Content is not null)
+                request.Content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(type);
+            foreach (var (name, value) in incoming.Headers)
+                if (!NotForwarded.Contains(name) && !name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase))
+                    request.Headers.TryAddWithoutValidation(name, (IEnumerable<string>)value);
             using var reply = await Mirror.SendAsync(request);
+            var text = await reply.Content.ReadAsStringAsync();
+            return (new Recorded((int)reply.StatusCode, reply.Content.Headers.ContentType?.ToString(), text, "your app running here"), null);
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException) { }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            return (null, "your app running here did not answer: " + ex.Message);
+        }
     }
 
     public async ValueTask DisposeAsync()

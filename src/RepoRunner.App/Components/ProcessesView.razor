@@ -76,6 +76,16 @@ else
         </div>
 
         var shown = map.Processes.Where(p => (area.Length == 0 || p.Area == area) && Matches(p)).ToList();
+        <div class="disc-mapbar">
+            <button class="btn small @(showWhole ? "primary" : "")" @onclick="() => showWhole = !showWhole">
+                <Icon Name="flow" Size="13" /> @(showWhole ? "Hide the map" : area.Length > 0 || search.Trim().Length > 0 ? $"Map of these {shown.Count} processes" : $"Map of all of {Repo.Name}")
+            </button>
+            <span class="flow-meta">Every process below on one map: which systems and stored procedures they share. Play it to go through them one by one.</span>
+        </div>
+        @if (showWhole && shown.Count > 0)
+        {
+            <ProcessMapView Process="Whole(shown)" AppName="@Repo.Name" SystemOf="SystemName" Follow="Follow" />
+        }
         @if (shown.Count == 0)
         {
             <div class="state"><h3>Nothing matches “@search”</h3><p>Try part of a page's name, a stored procedure such as ManualClaims, or a setting such as EsbUrl.</p></div>
@@ -149,6 +159,9 @@ else
             </div>
         </div>
 
+        <ProcessMapView Process="open" AppName="@Repo.Name" SystemOf="SystemName" Follow="Follow" />
+
+        <h4 class="disc-steps-title">Every step in detail</h4>
         <ol class="disc-steps">
             @foreach (var step in open.Steps)
             {
@@ -262,6 +275,19 @@ else
     [Parameter, EditorRequired] public Func<string, string, string> LinkTo { get; set; } = null!;
 
     private string search = "";
+    private bool showWhole;
+    private FoundProcess? whole;
+    private string wholeKey = "";
+
+    /// <summary>Several processes as one, each a step, so the map shows what they share. Kept while the selection is the same.</summary>
+    private FoundProcess Whole(List<FoundProcess> processes)
+    {
+        var key = string.Join("|", processes.Select(p => p.Key));
+        if (whole is not null && key == wholeKey) return whole;
+        wholeKey = key;
+        return whole = new FoundProcess("whole", area.Length > 0 ? area : Repo.Name, area.Length > 0 ? area : Repo.Name, "page", null, null, "", 0,
+            processes.Select(p => new ProcessStep(p.Key, p.Name, p.Touches.DistinctBy(t => (t.Kind, t.Title, t.Detail)).ToList(), p.File, p.Line)).ToList());
+    }
     /// <summary>One name per other system: OPSAPI and OpsApiBaseUrl are both OpsApi.</summary>
     private Dictionary<string, string> names = [];
     private string area = "";
