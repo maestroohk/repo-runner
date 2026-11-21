@@ -38,6 +38,22 @@ public sealed partial class SandboxServer : IAsyncDisposable
         }
     }
     private CodeIndex? _code;
+    private Task<CodeIndex>? _reading;
+
+    /// <summary>Hands over the reading of the app's code; calls that need it wait for it rather than go without.</summary>
+    public void ReadCodeWith(Task<CodeIndex> reading)
+    {
+        _reading = reading;
+        _ = reading.ContinueWith(t => { if (t.IsCompletedSuccessfully) Code = t.Result; }, TaskScheduler.Default);
+    }
+
+    /// <summary>Waits (up to half a minute) for the app's code to be read, so an early question still gets a made-up answer.</summary>
+    private async Task WaitForCode()
+    {
+        if (_code is not null || _reading is null) return;
+        await Task.WhenAny(_reading, Task.Delay(TimeSpan.FromSeconds(30)));
+        if (_code is null && _reading.IsCompletedSuccessfully) Code = _reading.Result;
+    }
 
     /// <summary>Values seen for each field name, in recordings and in the code: what made-up answers are filled with.</summary>
     private readonly Dictionary<string, List<string>> _pool = new(StringComparer.Ordinal);
@@ -239,6 +255,7 @@ public sealed partial class SandboxServer : IAsyncDisposable
         // it answers, still wins above).
         if (real is null && reads && AccessLookup().IsMatch(label))
         {
+            await WaitForCode();
             if (MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent, body) is { } open)
             {
                 real = new Recorded(200, "application/json", open, "made up: in the sandbox you have every permission");
@@ -266,7 +283,7 @@ public sealed partial class SandboxServer : IAsyncDisposable
             answer = similar;
             source = "similar";
         }
-        else if (MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent, body) is { } invented)
+        else if (await WaitForCode().ContinueWith(_ => MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent, body)) is { } invented)
         {
             // A change is still not sent anywhere; it just gets an answer the app can read, like a lookup does.
             answer = new Recorded(200, "application/json", invented, reads ? "made up from the code" : "held back; answer made up from the code");
@@ -334,9 +351,33 @@ public sealed partial class SandboxServer : IAsyncDisposable
             foreach (var candidate in order)
             {
                 if (sent.TryGetValue(candidate, out var echoed) && echoed.Count > 0) return echoed;
-                lock (_pool) if (_pool.TryGetValue(candidate, out var list) && list.Count > 0) return list.ToList();
+                List<string>? known;
+                lock (_pool) known = _pool.TryGetValue(candidate, out var list) && list.Count > 0 ? list.ToList() : null;
+                if (known is null) continue;
+                // Asked for one system's (or role's) list: only values that belong to it.
+                var fitting = known.Where(v => Belongs(candidate, v)).ToList();
+                return fitting.Count > 0 ? fitting : known;
             }
             return [];
+        }
+        // A value belongs to what the app asked for when its recorded row agrees with every value the app sent, or,
+        // for a dotted code nobody recorded (RCU.DASHBOARD), when it starts with a code the app sent and not another.
+        bool Belongs(string field, string value)
+        {
+            if (sent.Count == 0 || !(field.EndsWith("code") || field.EndsWith("id") || field.EndsWith("key"))) return true;
+            Dictionary<string, string>? row;
+            lock (_pool) _rows.TryGetValue((field, value), out row);
+            if (row is not null)
+                return sent.All(s => !row.TryGetValue(s.Key, out var own) || s.Value.Any(v => v.Equals(own, StringComparison.OrdinalIgnoreCase)));
+            var dot = value.IndexOf('.');
+            if (dot <= 0) return true;
+            var prefix = value[..dot];
+            var sentCodes = sent.Where(s => s.Key.EndsWith("code")).SelectMany(s => s.Value).ToList();
+            if (sentCodes.Any(c => c.Equals(prefix, StringComparison.OrdinalIgnoreCase))) return true;
+            List<string>? systems;
+            lock (_pool) _pool.TryGetValue("systemcode", out systems);
+            // Another system's code (OPS.CLAIMS when RCU was asked for) does not belong.
+            return !(systems?.Any(c => c.Equals(prefix, StringComparison.OrdinalIgnoreCase)) ?? false);
         }
         IReadOnlyDictionary<string, string>? RowOf(string field, string value)
         {

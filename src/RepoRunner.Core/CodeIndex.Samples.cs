@@ -208,10 +208,20 @@ public sealed partial class CodeIndex
         if (named.Where(n => n.Code.Contains('.'))
                 .OrderByDescending(n => n.Key.Contains("resource", StringComparison.OrdinalIgnoreCase) || n.Key.Contains("page", StringComparison.OrdinalIgnoreCase))
                 .Select(n => n.Code).FirstOrDefault() is { } dotted)
+        {
+            var prefix = "/" + dotted[..dotted.IndexOf('.')].ToLowerInvariant() + "/";
             foreach (var p in result.ToList())
+            {
+                // A route that does not even start where its code says (RCU.DASHBOARD at /ops/...) was borrowed from another row.
                 if ((p.Key.Contains("route", StringComparison.OrdinalIgnoreCase) || p.Key.Contains("path", StringComparison.OrdinalIgnoreCase))
-                    && p.Value is JsonValue rv && rv.TryGetValue<string>(out var rt) && (rt.StartsWith("Sample ") || rt == "/"))
+                    && p.Value is JsonValue rv && rv.TryGetValue<string>(out var rt)
+                    && (rt.StartsWith("Sample ") || rt == "/" || !rt.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
                     result[p.Key] = "/" + dotted.ToLowerInvariant().Replace('.', '/');
+                // A dashboard or home comes first, so an app that lands on its first page lands there.
+                if (p.Key.Contains("order", StringComparison.OrdinalIgnoreCase) && Regex.IsMatch(dotted, @"\.(DASHBOARD|HOME)$", RegexOptions.IgnoreCase))
+                    result[p.Key] = p.Value is JsonValue ov && ov.TryGetValue<string>(out _) ? "0" : 0;
+            }
+        }
         if (code is not null)
             foreach (var p in result.ToList())
                 if (p.Key.EndsWith("name", StringComparison.OrdinalIgnoreCase) && p.Value is JsonValue v && v.TryGetValue<string>(out var t) && t.StartsWith("Sample "))
@@ -234,7 +244,11 @@ public sealed partial class CodeIndex
         {
             var lower = field.ToLowerInvariant();
             foreach (var word in words)
+            {
                 if (!lower.StartsWith(word) && values(word + field) is { Count: > 0 } meant) return meant;
+                // A bare Code (or Id, Key) in a Role class is the role itself.
+                if (lower is "code" or "id" or "key" && values(word) is { Count: > 0 } itself) return itself;
+            }
             return values(field);
         };
     }
@@ -275,8 +289,10 @@ public sealed partial class CodeIndex
         {
             values = InContext(info, values);
             // The field with the most known values decides how many items there are (ResourceCode over SystemCode).
+            // A code says what the item is (ResourceCode); a record id only numbers it. Then the field with most known values.
             var identifying = PropertiesOf(info).Where(p => IdentifyingField().IsMatch(p.Name) && values(p.Name).Count > 0)
-                .OrderByDescending(p => values(p.Name).Count).FirstOrDefault();
+                .OrderByDescending(p => p.Name.EndsWith("Code", StringComparison.OrdinalIgnoreCase) && !p.Name.StartsWith("System", StringComparison.OrdinalIgnoreCase))
+                .ThenByDescending(p => values(p.Name).Count).FirstOrDefault();
             if (identifying.Name is not null)
             {
                 count = Math.Clamp(values(identifying.Name).Count, 1, 400);

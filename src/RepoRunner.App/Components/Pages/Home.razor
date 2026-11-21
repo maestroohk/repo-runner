@@ -3858,8 +3858,7 @@
                 server.MirrorTo = CopyTarget(repo!, repos);
                 server.ReadThrough = true;
                 server.KeepDataIn(System.IO.Path.Combine(Vaults.Use(v => v.RecordingsFolder(current)), "sandbox-data.json"));
-                var codeRoot = current.Path;
-                _ = Task.Run(() => { try { server.Code = CodeIndex.Build(codeRoot); } catch (Exception) { } });
+                server.ReadCodeWith(CodeOf(current.Path));
             }
             shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug", sandbox: server);
             tab = "output";
@@ -3890,6 +3889,21 @@
         }
         return null;
     };
+
+    /// <summary>Each repo's code, read once per RepoRunner run and again only when its files change.</summary>
+    private static readonly Dictionary<string, (string Print, Task<CodeIndex> Reading)> codeCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private static Task<CodeIndex> CodeOf(string root)
+    {
+        var print = Discovery.Fingerprint(root, out _);
+        lock (codeCache)
+        {
+            if (codeCache.TryGetValue(root, out var known) && known.Print == print && !known.Reading.IsFaulted) return known.Reading;
+            var reading = Task.Run(() => CodeIndex.Build(root));
+            codeCache[root] = (print, reading);
+            return reading;
+        }
+    }
 
     private void SetLive(EnvInfo env, bool live) => Try(() =>
     {
