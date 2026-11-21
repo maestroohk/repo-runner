@@ -3909,7 +3909,7 @@
         var recorded = hits.Count(h => h.Source is "recording" or "similar");
         var read = hits.Count(h => h.Source == "read");
         var local = hits.Count(h => h.Source == "local");
-        var madeUp = hits.Count(h => h.Source is "madeup" or "taught");
+        var madeUp = hits.Count(h => h.Source is "madeup" or "taught" or "heldmadeup");
         var kept = hits.Count(h => h.Source != "read" && CallSafety.Writes(h.Method, h.Label));
         var standIn = hits.Count(h => h.Source == "synthetic");
         <div class="sandbox-facts">
@@ -3950,7 +3950,7 @@
                     {
                         <div class="mono miss">
                             @SourceWord(group.Key.Source) · @group.Key.Method @group.Key.Label@(group.Count() > 1 ? $"  ×{group.Count()}" : "")
-                            @if (group.Key.Source is "madeup" or "taught" && group.Last() is var madeHit)
+                            @if (group.Key.Source is "madeup" or "taught" or "heldmadeup" && group.Last() is var madeHit)
                             {
                                 <button class="btn small sample-edit" @onclick="() => EditSample(session, madeHit)"><Icon Name="pencil" Size="11" /> @(sampleHit == madeHit ? "Editing" : "See or change")</button>
                             }
@@ -4013,6 +4013,7 @@
         "read" => "looked up on the real server",
         "local" => "answered by your app running here",
         "madeup" => "made-up answer (from the code)",
+        "heldmadeup" => "change held back, made-up answer",
         "taught" => "your sandbox data",
         "recording" => "recorded answer",
         "similar" => "recorded answer to a similar call",

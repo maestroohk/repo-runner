@@ -249,10 +249,11 @@ public sealed partial class SandboxServer : IAsyncDisposable
             answer = similar;
             source = "similar";
         }
-        else if (reads && MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent) is { } invented)
+        else if (MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent) is { } invented)
         {
-            answer = new Recorded(200, "application/json", invented, "made up from the code");
-            source = "madeup";
+            // A change is still not sent anywhere; it just gets an answer the app can read, like a lookup does.
+            answer = new Recorded(200, "application/json", invented, reads ? "made up from the code" : "held back; answer made up from the code");
+            source = reads ? "madeup" : "heldmadeup";
         }
 
         int status;
@@ -288,8 +289,12 @@ public sealed partial class SandboxServer : IAsyncDisposable
     {
         lock (_madeUp) if (_madeUp.TryGetValue(kind, out var known)) return known;
         if (Code is not { } code) return null;
-        var command = target ?? intent ?? path.TrimEnd('/').Split('/')[^1];
-        if (code.ResponseTypeFor(command) is not { } type) return null;
+        // The call is named in the code by its command, or by the end of its path ("User/Profile", "Profile").
+        var segments = path.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var names = new[] { target, intent }.Concat(Enumerable.Range(1, Math.Min(3, segments.Length)).Reverse()
+            .Select(n => string.Join('/', segments[^n..]))).Where(n => !string.IsNullOrEmpty(n)).Distinct();
+        var type = names.Select(n => code.ResponseTypeFor(n!)).FirstOrDefault(t => t is not null);
+        if (type is null) return null;
         IReadOnlyList<string> Known(string field)
         {
             lock (_pool) return _pool.TryGetValue(Norm(field), out var list) ? list.ToList() : [];
