@@ -35,23 +35,20 @@ internal static class FlowRecorder
     [ThreadStatic] private static bool _busy;
     private static long _exceptionWindow;
     private static int _exceptionsInWindow;
-    // Replay: host → stand-in address. A redirected request remembers where it was really going.
-    private static Dictionary<string, string>? _redirects;
+    // Sandbox: every web call not to this machine or a sign-in host goes to RepoRunner's stand-in instead.
+    // A redirected request remembers where it was really going.
+    private static string? _sandboxTarget;
+    private static readonly HashSet<string> SandboxAllowed = new(StringComparer.OrdinalIgnoreCase);
+    private static bool _sandbox;
     private static readonly ConditionalWeakTable<HttpRequestMessage, Uri> Originals = new();
     private static ActivityListener? _listener;
     private static IDisposable? _subscription;
 
-    public static void Start(string pipeName, string? redirect)
+    public static void Start(string pipeName, string? sandboxTarget, string[] allowed, bool sandbox)
     {
-        if (!string.IsNullOrEmpty(redirect))
-        {
-            _redirects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var pair in redirect!.Split('\n'))
-            {
-                var cut = pair.IndexOf('|');
-                if (cut > 0) _redirects[pair.Substring(0, cut)] = pair.Substring(cut + 1);
-            }
-        }
+        _sandbox = sandbox;
+        _sandboxTarget = string.IsNullOrEmpty(sandboxTarget) ? null : sandboxTarget!.TrimEnd('/');
+        foreach (var host in allowed) if (host.Trim().Length > 0) SandboxAllowed.Add(host.Trim());
 
         new Thread(() => Pump(pipeName)) { IsBackground = true, Name = "rr-flow" }.Start();
 
@@ -71,8 +68,24 @@ internal static class FlowRecorder
             w.WriteString("type", "hello");
             w.WriteNumber("pid", Environment.ProcessId);
             w.WriteString("runtime", Environment.Version.ToString());
+            w.WriteBoolean("sandbox", _sandbox);
+            w.WriteBoolean("guard", NetworkGuard_Armed());
         });
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool NetworkGuard_Armed() => _sandbox; // in a sandbox the app only gets this far with the guard armed
+
+    /// <summary>Reported by the guard: a connection it allowed (sign-in) or refused.</summary>
+    public static void Connection(string address, string? host, bool allowed) => Emit(w =>
+    {
+        w.WriteString("type", "connection");
+        w.WriteString("at", DateTime.UtcNow);
+        w.WriteString("address", address);
+        if (host is not null) w.WriteString("host", host);
+        w.WriteBoolean("allowed", allowed);
+        WriteIds(w, Activity.Current);
+    });
 
     // ---------- what is observed ----------
 
@@ -254,15 +267,16 @@ internal static class FlowRecorder
     }
 
     /// <summary>
-    /// In a replay, points a request for a recorded host at the stand-in instead. This happens after the app has
-    /// built the request and before it is sent, so it works wherever the app got the address from.
+    /// In the sandbox, points a request at RepoRunner's stand-in instead of the server it names. This happens after the
+    /// app has built the request and before it is sent, so it works wherever the app took the address from.
     /// </summary>
     private static void Redirect(HttpRequestMessage request)
     {
-        if (_redirects is null || request.RequestUri is not { IsAbsoluteUri: true } target) return;
-        if (!_redirects.TryGetValue(target.Authority, out var standIn)) return;
+        if (_sandboxTarget is null || request.RequestUri is not { IsAbsoluteUri: true } target) return;
+        var host = target.Host.Trim('[', ']');
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || host == "127.0.0.1" || host == "::1" || SandboxAllowed.Contains(host)) return;
         try { Originals.Add(request, target); } catch (ArgumentException) { }
-        request.RequestUri = new Uri(standIn + target.PathAndQuery);
+        request.RequestUri = new Uri($"{_sandboxTarget}/{target.Scheme}/{target.Authority}{target.PathAndQuery}");
     }
 
     private const int MaxCapture = 600_000;

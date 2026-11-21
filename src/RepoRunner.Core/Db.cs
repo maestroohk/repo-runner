@@ -51,7 +51,7 @@ internal sealed class Db : IDisposable
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS environments (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            protected INTEGER NOT NULL DEFAULT 0, salt BLOB, verifier BLOB);
+            protected INTEGER NOT NULL DEFAULT 0, salt BLOB, verifier BLOB, live INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS repos (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             path TEXT NOT NULL UNIQUE COLLATE NOCASE, default_target TEXT, default_env TEXT);

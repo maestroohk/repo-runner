@@ -148,6 +148,34 @@ public sealed partial class FlowHub : IDisposable
     public string PipeName { get; } = "rr-flow-" + Guid.NewGuid().ToString("N");
     public bool Connected { get; private set; }
 
+    /// <summary>A connection the sandbox guard allowed (sign-in) or refused before it was made.</summary>
+    public sealed record ConnectionAttempt(DateTime At, string Address, string? Host, bool Allowed);
+
+    private readonly List<ConnectionAttempt> _connections = [];
+    private readonly HashSet<string> _allowedAddresses = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The app's process, once it has said hello.</summary>
+    public int? Pid { get; private set; }
+    /// <summary>True once the app reported that it runs in the sandbox with the guard armed.</summary>
+    public bool Guarded { get; private set; }
+
+    public List<ConnectionAttempt> Connections()
+    {
+        lock (_connections) return [.. _connections];
+    }
+
+    /// <summary>Whether the guard reported allowing a connection to this IP address.</summary>
+    public bool WasAllowed(string ip)
+    {
+        lock (_connections) return _allowedAddresses.Contains(Plain(ip));
+    }
+
+    /// <summary>An IP address written one way only: IPv4 addresses carried over IPv6 are written as IPv4.</summary>
+    private static string Plain(string address) =>
+        System.Net.IPAddress.TryParse(address.Trim('[', ']'), out var ip)
+            ? (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString()
+            : address;
+
     public FlowHub(IEnumerable<string> secretValues, Action changed)
     {
         _secrets = secretValues.Where(v => v.Length >= 6).Distinct().OrderByDescending(v => v.Length).ToList();
@@ -198,7 +226,26 @@ public sealed partial class FlowHub : IDisposable
         var e = doc.RootElement;
         string? Text(string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? Mask(v.GetString()!) : null;
         var type = Text("type");
-        if (type is null or "hello") return;
+        if (type == "hello")
+        {
+            Pid = e.TryGetProperty("pid", out var pid) ? pid.GetInt32() : null;
+            Guarded = e.TryGetProperty("sandbox", out var sandboxed) && sandboxed.GetBoolean();
+            _changed();
+            return;
+        }
+        if (type == "connection")
+        {
+            var attempt = new ConnectionAttempt(e.GetProperty("at").GetDateTime(), Text("address") ?? "?", Text("host"),
+                e.TryGetProperty("allowed", out var ok) && ok.GetBoolean());
+            lock (_connections)
+            {
+                if (_connections.Count < 2000) _connections.Add(attempt);
+                if (attempt.Allowed) _allowedAddresses.Add(Plain(attempt.Address));
+            }
+            _changed();
+            return;
+        }
+        if (type is null) return;
 
         lock (_flows)
         {

@@ -49,6 +49,9 @@ public sealed partial class Vault : IDisposable
         try
         {
             db.Exec(Db.Schema);
+            // Vaults made before environments had a live switch: add it, off.
+            if (db.Query("SELECT COUNT(*) FROM pragma_table_info('environments') WHERE name='live'", r => r.GetInt64(0)).Single() == 0)
+                db.Exec("ALTER TABLE environments ADD COLUMN live INTEGER NOT NULL DEFAULT 0");
             var wrapped = db.Query("SELECT value FROM meta WHERE key='vault_key'", r => (byte[])r[0]).FirstOrDefault();
             byte[] vaultKey;
             if (wrapped is null)
@@ -81,13 +84,20 @@ public sealed partial class Vault : IDisposable
 
     // ---------- environments ----------
 
-    private static EnvInfo MapEnv(SqliteDataReader r) => new(r.GetInt64(0), r.GetString(1), r.GetInt64(2) != 0, !r.IsDBNull(3));
+    private static EnvInfo MapEnv(SqliteDataReader r) => new(r.GetInt64(0), r.GetString(1), r.GetInt64(2) != 0, !r.IsDBNull(3), r.GetInt64(4) != 0);
+
+    /// <summary>Lets apps run on this environment reach real servers, or confines them to the sandbox again.</summary>
+    public void SetLive(EnvInfo env, bool live)
+    {
+        _db.Exec("UPDATE environments SET live=$l WHERE id=$id", ("$l", live ? 1 : 0), ("$id", env.Id));
+        Audit(live ? "env-live-on" : "env-live-off", null, env.Name);
+    }
 
     public List<EnvInfo> Environments() =>
-        _db.Query("SELECT id, name, protected, salt FROM environments ORDER BY id", MapEnv);
+        _db.Query("SELECT id, name, protected, salt, live FROM environments ORDER BY id", MapEnv);
 
     public EnvInfo GetEnv(string name) =>
-        _db.Query("SELECT id, name, protected, salt FROM environments WHERE name=$n", MapEnv, ("$n", name)).FirstOrDefault()
+        _db.Query("SELECT id, name, protected, salt, live FROM environments WHERE name=$n", MapEnv, ("$n", name)).FirstOrDefault()
         ?? throw new VaultException($"Unknown environment '{name}'. Known: {string.Join(", ", Environments().Select(e => e.Name))}.");
 
     public EnvInfo AddEnv(string name, bool isProtected)

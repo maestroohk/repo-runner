@@ -77,8 +77,10 @@ public sealed class RunSession
     /// <summary>What the app is doing, as seen from inside it. Null when recording is off for this run.</summary>
     public FlowHub? Flows { get; internal set; }
     public string? Solution { get; init; }
-    /// <summary>Set when this run is answered by a recording instead of the real services.</summary>
-    public MockServer? Mock { get; init; }
+    /// <summary>Set when this run is sandboxed: its web calls are answered here and nothing reaches a real server.</summary>
+    public SandboxServer? Sandbox { get; init; }
+    /// <summary>Set if the watchdog had to stop the app because it held a connection the sandbox did not allow.</summary>
+    public string? Breach { get; internal set; }
     public DateTime Started { get; } = DateTime.Now;
     public DateTime? Ended { get; internal set; }
     public int? ExitCode { get; internal set; }
@@ -115,14 +117,16 @@ public sealed class SessionManager
     }
 
     public RunSession Start(VaultService vaults, RepoInfo repo, EnvInfo env, TargetDef target, bool watch, bool debug = false,
-        IEnumerable<KeyValuePair<string, string>>? overrides = null, MockServer? mock = null)
+        IEnumerable<KeyValuePair<string, string>>? overrides = null, SandboxServer? sandbox = null)
     {
         if (All().Any(s => s.Running && s.Repo == repo.Name && s.Target == target.Name))
             throw new VaultException($"{target.Name} is already running. Stop it first.");
 
         // Recording is for development data only: never for a protected environment.
         var record = target.Kind == "dotnet" && !env.Protected;
-        if (mock is not null && !record) throw new VaultException("A replay needs a .NET target on an environment that is not protected.");
+        if (sandbox is not null && target.Kind != "dotnet") throw new VaultException("Only .NET apps can be run in the sandbox.");
+        if (sandbox is null && !env.Live && target.Kind == "dotnet")
+            throw new VaultException($"{env.Name} is sandbox-only: apps run from it may not reach real servers.");
         FlowHub? hub = null;
 
         var (specs, block, secrets, injected) = vaults.Use(vault =>
@@ -136,10 +140,10 @@ public sealed class SessionManager
             environment["RR_ENV"] = env.Name;
             environment["RR_TARGET"] = target.Name;
             var secretValues = resolved.SecretNames.Select(n => resolved.Values[n]).ToList();
-            if (record) hub = new FlowHub(secretValues, () => Interlocked.Increment(ref _version));
-            if (debug || record) DebugSupport.Apply(environment, repo, target, waitForDebugger: debug, flowPipe: hub?.PipeName,
-                redirects: mock?.Hosts.Select(host => new KeyValuePair<string, string>(host, mock.BaseFor(host))));
-            vault.Audit(debug ? "debug" : watch ? "watch" : "run", repo.Name, env.Name, target.Name);
+            if (record || sandbox is not null) hub = new FlowHub(secretValues, () => Interlocked.Increment(ref _version));
+            if (debug || hub is not null) DebugSupport.Apply(environment, repo, target, waitForDebugger: debug, flowPipe: hub?.PipeName,
+                sandboxTarget: sandbox?.Base, sandboxAllowed: SandboxServer.SignInHosts);
+            vault.Audit((debug ? "debug" : watch ? "watch" : "run") + (sandbox is null ? "-live" : "-sandbox"), repo.Name, env.Name, target.Name);
             return (list, environment, resolved.SecretNames.Select(n => resolved.Values[n]).ToList(), resolved.Values.Count);
         });
 
@@ -149,10 +153,10 @@ public sealed class SessionManager
             Target = target.Name,
             Env = env.Name,
             Protected = env.Protected,
-            Labels = string.Join(" + ", specs.Select(s => s.Label)) + (mock is not null ? " (replay)" : debug ? " (debug)" : watch ? " (watch)" : ""),
+            Labels = string.Join(" + ", specs.Select(s => s.Label)) + (debug ? " (debug)" : watch ? " (watch)" : ""),
             Url = target.Urls?.Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(),
             Flows = hub,
-            Mock = mock,
+            Sandbox = sandbox,
             Solution = target.Kind == "dotnet" ? DebugSupport.FindSolution(repo, target) : null,
         };
         lock (_sessions) _sessions.Add(session);
@@ -186,10 +190,40 @@ public sealed class SessionManager
             }
             session.Ended = DateTime.Now;
             session.Flows?.Dispose(); // stop listening; what was captured stays viewable
-            if (session.Mock is not null) await session.Mock.DisposeAsync();
+            if (session.Sandbox is not null) await session.Sandbox.DisposeAsync();
             Interlocked.Increment(ref _version);
         });
+        if (sandbox is not null && hub is not null) _ = Task.Run(() => Watch(session, hub));
         return session;
+    }
+
+    /// <summary>
+    /// The sandbox's second line. Twice a second, asks Windows which TCP connections the app's process holds. A
+    /// connection to anything but this machine, which the guard did not report allowing (sign-in), means something got
+    /// past the guard: the app is stopped at once and the address named.
+    /// </summary>
+    private async Task Watch(RunSession session, FlowHub hub)
+    {
+        var strikes = new Dictionary<string, int>();
+        while (session.Running)
+        {
+            await Task.Delay(500);
+            if (hub.Pid is not { } pid) continue;
+            foreach (var remote in ConnectionWatch.Of(pid))
+            {
+                var ip = remote.Address.ToString();
+                if (hub.WasAllowed(ip)) continue;
+                // One look's grace: the guard's report of an allowed sign-in connection can trail the connection itself.
+                var key = $"{ip}:{remote.Port}";
+                strikes[key] = strikes.GetValueOrDefault(key) + 1;
+                if (strikes[key] < 2) continue;
+                session.Breach = $"The app held a connection to {key} that the sandbox had not allowed. RepoRunner stopped it.";
+                session.Append("[rr-sandbox] " + session.Breach);
+                Stop(session);
+                Interlocked.Increment(ref _version);
+                return;
+            }
+        }
     }
 
     public void Stop(RunSession session)

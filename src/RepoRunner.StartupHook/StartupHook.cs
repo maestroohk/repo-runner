@@ -34,16 +34,26 @@ internal static class StartupHook
 
             var pipe = Environment.GetEnvironmentVariable("RR_FLOW_PIPE");
             var wait = Environment.GetEnvironmentVariable("RR_DEBUG_WAIT") == "1";
-            var redirect = Environment.GetEnvironmentVariable("RR_FLOW_REDIRECT");
+            var sandbox = Environment.GetEnvironmentVariable("RR_SANDBOX") == "1";
+            var sandboxTarget = Environment.GetEnvironmentVariable("RR_SANDBOX_TARGET");
+            var allowed = (Environment.GetEnvironmentVariable("RR_SANDBOX_ALLOW") ?? "").Split(',');
 
             // Processes this app starts must not be hooked as well.
-            foreach (var name in new[] { "RR_HOOK_TARGET", "RR_FLOW_PIPE", "RR_FLOW_REDIRECT", "RR_DEBUG_WAIT", "DOTNET_STARTUP_HOOKS" })
+            foreach (var name in new[] { "RR_HOOK_TARGET", "RR_FLOW_PIPE", "RR_SANDBOX", "RR_SANDBOX_TARGET", "RR_SANDBOX_ALLOW", "RR_DEBUG_WAIT", "DOTNET_STARTUP_HOOKS" })
                 Environment.SetEnvironmentVariable(name, null);
+
+            // The guard goes first and is not optional: a sandboxed app that cannot be guarded does not run.
+            if (sandbox && !ArmGuard(allowed))
+            {
+                Console.Error.WriteLine("[rr-sandbox] RepoRunner could not guard this app's network connections (it needs .NET 9 or later), so it was stopped before it started. Nothing left this machine.");
+                Console.Error.Flush();
+                Environment.Exit(87);
+            }
 
             if (!string.IsNullOrEmpty(pipe))
             {
-                try { StartRecorder(pipe!, redirect); }
-                catch { /* recording is optional */ }
+                try { StartRecorder(pipe!, sandbox ? sandboxTarget : null, allowed, sandbox); }
+                catch { /* recording is optional; the guard above still holds */ }
             }
             if (wait) WaitForDebugger(pid);
         }
@@ -55,7 +65,15 @@ internal static class StartupHook
 
     // Kept out of line so a missing diagnostics type cannot break Initialize itself.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void StartRecorder(string pipe, string? redirect) => FlowRecorder.Start(pipe, redirect);
+    private static void StartRecorder(string pipe, string? sandboxTarget, string[] allowed, bool sandbox) =>
+        FlowRecorder.Start(pipe, sandboxTarget, allowed, sandbox);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool ArmGuard(string[] allowed)
+    {
+        try { return NetworkGuard.Arm(allowed, FlowRecorder.Connection); }
+        catch { return false; }
+    }
 
     private static void WaitForDebugger(int pid)
     {

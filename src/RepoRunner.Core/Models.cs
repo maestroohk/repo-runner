@@ -1,6 +1,7 @@
 namespace RepoRunner.Core;
 
-public sealed record EnvInfo(long Id, string Name, bool Protected, bool HasPassphrase);
+/// <param name="Live">True when apps run from RepoRunner on this environment may reach real servers. Off by default.</param>
+public sealed record EnvInfo(long Id, string Name, bool Protected, bool HasPassphrase, bool Live = false);
 
 public sealed record RepoInfo(long Id, string Name, string Path, string? DefaultTarget, string? DefaultEnv);
 

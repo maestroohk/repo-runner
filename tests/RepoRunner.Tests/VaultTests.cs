@@ -77,6 +77,24 @@ public class VaultTests
     }
 
     [Fact]
+    public void Environments_are_sandbox_only_until_made_live()
+    {
+        using var home = new TempHome();
+        var vaultDir = home.Dir("vault");
+        using (var vault = Vault.Open(vaultDir))
+        {
+            var uat = vault.GetEnv("UAT");
+            Assert.False(uat.Live);
+            vault.SetLive(uat, true);
+        }
+        using (var vault = Vault.Open(vaultDir))
+        {
+            Assert.True(vault.GetEnv("UAT").Live);
+            Assert.False(vault.GetEnv("DEV").Live);
+        }
+    }
+
+    [Fact]
     public void Names_are_case_insensitive_and_setting_again_overwrites()
     {
         using var home = new TempHome();

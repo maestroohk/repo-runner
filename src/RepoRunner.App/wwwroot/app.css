@@ -630,3 +630,18 @@ summary.code-row::-webkit-details-marker { display: none; }
 @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
 }
+
+/* ---------- sandbox ---------- */
+.safety { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; margin: 0 0 14px; border-radius: 10px; font-size: 13px; color: var(--text-2); }
+.safety.sandboxed { background: var(--ok-soft); }
+.safety.sandboxed > .icon { color: var(--ok); }
+.safety.live { background: var(--warn-soft); }
+.safety.live > .icon { color: var(--warn); }
+.safety > .icon { margin-top: 1px; flex: none; }
+.safety-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.safety-text b { color: var(--text); }
+.safety .btn { flex: none; }
+.sandbox-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 6px; }
+.sandbox-facts .fact { display: inline-flex; align-items: center; gap: 4px; }
+.sandbox-facts details.more { flex-basis: 100%; }
+.ok-text { color: var(--ok); }

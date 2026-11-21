@@ -494,6 +494,7 @@ internal static class Cli
         var repo = RepoOf(vault, args);
         var env = EnvOf(vault, args, repo);
         var target = vault.GetTarget(repo, args.Pos(0));
+        RequireLive(env, $"run {target.Name}");
         var resolved = vault.Resolve(repo, env, target, Overrides(args));
 
         var specs = new List<ProcessSpec> { Launcher.ForTarget(repo, target, watch, args.Rest) };
@@ -512,10 +513,22 @@ internal static class Cli
         if (args.Rest.Count == 0) throw new VaultException("Give the command after '--', e.g. rr exec --env UAT -- dotnet ef database update");
         var repo = RepoOf(vault, args);
         var env = EnvOf(vault, args, repo);
+        RequireLive(env, "run commands");
         var resolved = vault.Resolve(repo, env, null, Overrides(args));
         var spec = Launcher.ForCommand(args.Rest[0], args.Rest[0], args.Rest[1..], Directory.GetCurrentDirectory());
         vault.Audit("exec", repo.Name, env.Name, args.Rest[0]);
         return await Launch(vault, [spec], resolved, repo.Name, env, "exec", args.Has("clean"));
+    }
+
+    /// <summary>
+    /// The command line has no sandbox: what it starts reaches whatever its settings point at. So it starts nothing on an
+    /// environment that is sandbox-only; the window runs those apps in the sandbox.
+    /// </summary>
+    private static void RequireLive(EnvInfo env, string what)
+    {
+        if (!env.Live)
+            throw new VaultException($"{env.Name} is sandbox-only, and rr cannot {what} in the sandbox. Start it from the RepoRunner window, " +
+                $"which runs it in the sandbox, or allow real servers for {env.Name} there first.");
     }
 
     private static async Task<int> Launch(Vault vault, List<ProcessSpec> specs, ResolvedEnvironment resolved, string repoName,

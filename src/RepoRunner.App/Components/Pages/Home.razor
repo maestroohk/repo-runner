@@ -135,6 +135,41 @@
                     </div>
                 </header>
 
+                @{ var safetyEnv = envs.FirstOrDefault(e => e.Name == envName); }
+                @if (safetyEnv is not null)
+                {
+                    <div class="safety @(safetyEnv.Live ? "live" : "sandboxed")">
+                        <Icon Name="@(safetyEnv.Live ? "globe" : "shield")" Size="18" />
+                        <div class="safety-text">
+                            @if (safetyEnv.Live)
+                            {
+                                <b>@safetyEnv.Name is live.</b>
+                                <span>Apps you start here talk to the real servers of @safetyEnv.Name. What they save is saved for real.</span>
+                            }
+                            else
+                            {
+                                <b>Sandbox: nothing leaves this computer.</b>
+                                <span>
+                                    When you start a .NET app on @safetyEnv.Name, RepoRunner answers its calls to other services itself, with answers
+                                    from your recordings where it has them and harmless stand-in answers otherwise. Only signing in to Microsoft goes out.
+                                    Any other connection is refused before it is made.
+                                </span>
+                            }
+                        </div>
+                        @if (safetyEnv.Live)
+                        {
+                            <button class="btn small" @onclick="() => SetLive(safetyEnv, false)"><Icon Name="shield" Size="13" /> Back to the sandbox</button>
+                        }
+                        else if (!safetyEnv.Protected)
+                        {
+                            <button class="btn small @(confirmKey == "live:" + safetyEnv.Name ? "confirm" : "")" title="Let apps started on this environment reach its real servers"
+                                    @onclick="@(() => Confirm("live:" + safetyEnv.Name, () => SetLive(safetyEnv, true)))">
+                                @(confirmKey == "live:" + safetyEnv.Name ? $"Click again: real servers of {safetyEnv.Name}" : "Allow real servers")
+                            </button>
+                        }
+                    </div>
+                }
+
                 <section class="targets">
                     @if (targets.Count == 0)
                     {
@@ -170,6 +205,17 @@
                                 @if (missing.Count > 0)
                                 {
                                     <div class="target-warn"><Icon Name="alert" Size="14" /> @envName is missing @string.Join(", ", missing)</div>
+                                }
+                                @if (live?.Sandbox is not null)
+                                {
+                                    @SandboxFacts(live)
+                                }
+                                else if (live is null && safetyEnv is { Live: false } && (t.Kind != "dotnet" || t.Companions.Count > 0))
+                                {
+                                    <div class="target-warn" title="RepoRunner can only fence in .NET apps.">
+                                        <Icon Name="alert" Size="14" />
+                                        @(t.Kind != "dotnet" ? "Not a .NET app, so it cannot be sandboxed: it reaches whatever its settings point at." : $"{string.Join(", ", t.Companions)} start alongside and are not sandboxed.")
+                                    </div>
                                 }
                                 @if (t.Kind == "dotnet" && solutions.Count > 1)
                                 {
@@ -679,7 +725,7 @@
                             var systems = allCalls.GroupBy(c => c.SystemKey).Select(g => (Key: g.Key, Name: g.First().System, Calls: g.Count(), Failed: g.Count(c => c.Failed || c.Soft))).ToList();
                             var nothingFound = allCalls.Count(c => c.Empty);
                             var visible = steps.Where(StepMatches).ToList();
-                            var replay = RepoSessions.LastOrDefault(s => s.Running && s.Mock is not null);
+                            var sandboxed = RepoSessions.LastOrDefault(s => s.Running && s.Sandbox is not null);
 
                             <div class="proc-bar">
                                 @if (recordingSince is not null)
@@ -747,44 +793,14 @@
                                 }
                             </div>
 
-                            @if (replay?.Mock is { } mock)
+                            @if (sandboxed is not null)
                             {
-                                var hits = mock.Hits();
-                                var fromRecording = hits.Count(h => h.Source == "recording");
-                                var real = hits.Where(h => h.Source == "real").ToList();
-                                var failed = hits.Where(h => h.Source == "failed").ToList();
-                                <div class="callout @(failed.Count > 0 ? "" : "calm")">
-                                    <Icon Name="@(failed.Count > 0 ? "alert" : "play")" />
+                                <div class="callout calm">
+                                    <Icon Name="shield" />
                                     <div class="replay-box">
-                                        <b>The app is running against “@mock.ProcessName”.</b>
-                                        <div>
-                                            Use @repo.Name as you normally would. When it asks @string.Join(", ", mock.Hosts) the same thing it asked during the recording,
-                                            RepoRunner answers with what was said then, so nothing is saved, approved or emailed for real.
-                                            Anything the recording does not hold @(mock.PassThrough ? "is passed on to the real service" : "is refused").
-                                        </div>
-                                        <div class="facts">
-                                            <span class="fact">Answered from the recording <b>@fromRecording</b></span>
-                                            <span class="fact">Sent to the real service <b class="@(real.Count > 0 ? "warn-text" : "")">@real.Count</b></span>
-                                            @if (failed.Count > 0)
-                                            {
-                                                <span class="fact">Failed <b class="bad-text">@failed.Count</b></span>
-                                            }
-                                            <label class="check"><input type="checkbox" checked="@(!mock.PassThrough)" @onchange="e => mock.PassThrough = !(bool)e.Value!" /> Refuse calls that are not in the recording</label>
-                                        </div>
-                                        @if (real.Count > 0)
-                                        {
-                                            <details class="more">
-                                                <summary>What went to the real service (@real.Count)</summary>
-                                                @foreach (var group in real.GroupBy(h => h.Method + " " + h.Label).Take(40))
-                                                {
-                                                    <div class="mono miss">@group.Key@(group.Count() > 1 ? $"  ×{group.Count()}" : "")</div>
-                                                }
-                                            </details>
-                                        }
-                                        @foreach (var miss in failed.DistinctBy(h => h.Method + h.Label).Take(6))
-                                        {
-                                            <div class="mono miss">@miss.Status @miss.Method @miss.Label</div>
-                                        }
+                                        <b>@sandboxed.Target is running in the sandbox@(sandboxed.Sandbox!.Preferred is { } first ? $", answering from “{first}” first" : "").</b>
+                                        <div>Use the app as you normally would. Nothing it saves, approves or sends reaches a real server.</div>
+                                        @SandboxFacts(sandboxed)
                                     </div>
                                 </div>
                             }
@@ -839,8 +855,8 @@
                                         </button>
                                         @if (opened is not null)
                                         {
-                                            <button class="btn primary small" title="Start the app with its services replaced by this recording's responses" @onclick="() => RunAgainst(opened)">
-                                                <Icon Name="play" Size="11" /> Run the app against this recording
+                                            <button class="btn primary small" title="Start the app in the sandbox. Questions it asks the same way as in this recording get this recording's answers." @onclick="() => RunAgainst(opened)">
+                                                <Icon Name="play" Size="11" /> Run in the sandbox with this recording's answers
                                             </button>
                                             <button class="btn small @(confirmKey == "proc:" + opened.Id ? "confirm" : "")" @onclick="@(() => Confirm("proc:" + opened.Id, () => DeleteProcess(opened)))">
                                                 <Icon Name="trash" Size="13" /> @(confirmKey == "proc:" + opened.Id ? "Click again to delete" : "Delete")
@@ -2170,42 +2186,18 @@
         procId = null;
     });
 
-    /// <summary>
-    /// Starts the app with each recorded service replaced by the recording: the address variables that pointed at
-    /// those services are pointed at a local stand-in that answers as the real ones did.
-    /// </summary>
+    /// <summary>Starts the app in the sandbox, answering first from this recording.</summary>
     private async Task RunAgainst(SavedProcess process)
     {
-        try
+        var target = targets.FirstOrDefault(t => t.Kind == "dotnet" && t.Name.Equals(repo!.DefaultTarget, StringComparison.OrdinalIgnoreCase))
+            ?? targets.FirstOrDefault(t => t.Kind == "dotnet");
+        if (target is null) { Say("This repo has no .NET app to run.", error: true); return; }
+        if (sessions.Any(s => s.Running && s.Repo == repo!.Name && s.Target == target.Name))
         {
-            var current = repo!;
-            var env = CurrentEnv;
-            if (!Vaults.IsUnlocked(env)) throw new VaultException($"Unlock {env.Name} first.");
-            var target = targets.FirstOrDefault(t => t.Kind == "dotnet" && t.Name.Equals(current.DefaultTarget, StringComparison.OrdinalIgnoreCase))
-                ?? targets.FirstOrDefault(t => t.Kind == "dotnet")
-                ?? throw new VaultException("This repo has no .NET target to run.");
-            if (sessions.Any(s => s.Running && s.Repo == current.Name && s.Target == target.Name))
-                throw new VaultException($"{target.Name} is running. Stop it, then start the replay.");
-
-            var mock = await MockServer.StartAsync(process, () => { });
-            if (mock.Hosts.Count == 0)
-            {
-                await mock.DisposeAsync();
-                throw new VaultException("This recording holds no calls to other services, so there is nothing to stand in for.");
-            }
-            try
-            {
-                shown = Sessions.Start(Vaults, current, env, target, watch: false, debug: false, overrides: null, mock);
-            }
-            catch
-            {
-                await mock.DisposeAsync();
-                throw;
-            }
-            sessions = Sessions.All();
-            Say($"Started {target.Name} against “{process.Name}”. Calls to {string.Join(", ", mock.Hosts)} are answered from the recording.");
+            Say($"{target.Name} is running. Stop it, then start it again with this recording.", error: true);
+            return;
         }
-        catch (VaultException ex) { Say(ex.Message, error: true); }
+        await Run(target, "Run", process.Id, sandboxOnly: true);
     }
 
     /// <summary>A captured body for display: secrets blanked, JSON indented.</summary>
@@ -2529,8 +2521,11 @@
     private string? ResendBlocked(ProcCall call)
     {
         var env = RecordedOn;
-        if (envs.FirstOrDefault(e => e.Name == env)?.Protected == true)
+        var recordedOn = envs.FirstOrDefault(e => e.Name == env);
+        if (recordedOn?.Protected == true)
             return $"Recorded on {env}, a protected environment: calls from it are never sent again.";
+        if (recordedOn is not { Live: true })
+            return $"{env} is sandbox-only, so nothing is sent to its servers. To send calls again, allow real servers for {env} above the run targets first.";
         if (call.Url is null) return "The address of this call was not recorded.";
         if (call.Body?.Request is null && call.Body?.RequestHeaders?.ContainsKey("Content-Type") == true)
             return "Its request body was binary or a stream and was not captured, so it cannot be sent again exactly.";
@@ -3534,20 +3529,100 @@
 
     // ---------- running ----------
 
-    private void Run(TargetDef target, string mode)
+    /// <summary>
+    /// Starts a target. .NET apps on an environment that is not live run in the sandbox: a local stand-in answers their
+    /// web calls (from the repo's recordings, <paramref name="preferredRecording"/> first) and nothing else leaves the machine.
+    /// </summary>
+    private async Task Run(TargetDef target, string mode, string? preferredRecording = null, bool sandboxOnly = false)
     {
         var env = CurrentEnv;
-        if (!Vaults.IsUnlocked(env)) { OpenUnlock(() => Run(target, mode)); return; }
+        if (!Vaults.IsUnlocked(env)) { OpenUnlock(() => _ = Run(target, mode, preferredRecording, sandboxOnly)); return; }
         var key = $"run:{target.Name}:{mode}";
         if (env.Protected && confirmKey != key) { confirmKey = key; return; }
         confirmKey = null;
-        Try(() =>
+        var sandbox = target.Kind == "dotnet" && (!env.Live || sandboxOnly);
+        SandboxServer? server = null;
+        try
         {
-            shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug");
+            if (sandbox)
+            {
+                var current = repo!;
+                var recordings = await Task.Run(() => Recordings.List(current));
+                server = await SandboxServer.StartAsync(recordings, preferredRecording);
+            }
+            shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug", sandbox: server);
             tab = "output";
             sessions = Sessions.All();
-        });
+            if (server is not null)
+                Say($"Started {target.Name} in the sandbox. {(server.Recordings == 0 ? "There are no recordings yet, so every call gets a stand-in answer." : $"Calls are answered from {server.Recordings} recording(s) where they match.")}");
+        }
+        catch (VaultException ex)
+        {
+            if (server is not null) await server.DisposeAsync();
+            Say(ex.Message, error: true);
+        }
     }
+
+    private void SetLive(EnvInfo env, bool live) => Try(() =>
+    {
+        if (live && env.Protected) throw new VaultException($"{env.Name} is protected. Apps run from RepoRunner never reach its servers.");
+        Vaults.Use(v => v.SetLive(env, live));
+        Reload();
+        Say(live ? $"{env.Name} is live: apps you start on it now reach its real servers." : $"{env.Name} is sandbox-only again.");
+    });
+
+    /// <summary>What the sandbox did for a running app, in counts a support person can read.</summary>
+    private RenderFragment SandboxFacts(RunSession session) => __builder =>
+    {
+        var hits = session.Sandbox!.Hits();
+        var attempts = session.Flows?.Connections() ?? [];
+        var refused = attempts.Where(a => !a.Allowed).ToList();
+        var signIns = attempts.Count(a => a.Allowed);
+        var recorded = hits.Count(h => h.Source is "recording" or "similar");
+        var standIn = hits.Count(h => h.Source == "synthetic");
+        <div class="sandbox-facts">
+            @if (session.Breach is not null)
+            {
+                <span class="fact bad-text"><Icon Name="alert" Size="13" /> @session.Breach</span>
+            }
+            else if (session.Flows is { Pid: not null, Guarded: false })
+            {
+                <span class="fact bad-text"><Icon Name="alert" Size="13" /> The app did not confirm its sandbox guard.</span>
+            }
+            else
+            {
+                <span class="fact ok-text"><Icon Name="shield" Size="13" /> Sandboxed</span>
+            }
+            <span class="fact" title="Calls answered with what the real service said during one of your recordings">From recordings <b>@recorded</b></span>
+            <span class="fact" title="Calls no recording covers. Changes get “accepted”, lookups get “nothing found”. Nothing is saved.">Stand-in answers <b>@standIn</b></span>
+            <span class="fact" title="Connections the app tried to open to other machines. Each was refused before anything was sent.">Connections refused <b class="@(refused.Count > 0 ? "warn-text" : "")">@refused.Count</b></span>
+            @if (signIns > 0)
+            {
+                <span class="fact" title="Connections to Microsoft sign-in, the only place a sandboxed app may reach">Sign-in <b>@signIns</b></span>
+            }
+            @if (hits.Count > 0 || refused.Count > 0)
+            {
+                <details class="more">
+                    <summary>Details</summary>
+                    @foreach (var group in hits.GroupBy(h => (h.Source, h.Method, h.Label)).OrderByDescending(g => g.Count()).Take(40))
+                    {
+                        <div class="mono miss">@SourceWord(group.Key.Source) · @group.Key.Method @group.Key.Label@(group.Count() > 1 ? $"  ×{group.Count()}" : "")</div>
+                    }
+                    @foreach (var group in refused.GroupBy(a => a.Host ?? a.Address).Take(20))
+                    {
+                        <div class="mono miss">refused · @group.Key@(group.Count() > 1 ? $"  ×{group.Count()}" : "")</div>
+                    }
+                </details>
+            }
+        </div>
+    };
+
+    private static string SourceWord(string source) => source switch
+    {
+        "recording" => "recorded answer",
+        "similar" => "recorded answer to a similar call",
+        _ => "stand-in answer",
+    };
 
     private void StopSession(RunSession session) => Sessions.Stop(session);
 
