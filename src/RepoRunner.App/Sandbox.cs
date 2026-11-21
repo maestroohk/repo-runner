@@ -13,7 +13,7 @@ namespace RepoRunner.App;
 /// command with other inputs; or a synthetic answer that says plainly it came from the sandbox. Nothing is ever
 /// passed on. It listens on loopback only, behind a path no other program knows.
 /// </summary>
-public sealed class SandboxServer : IAsyncDisposable
+public sealed partial class SandboxServer : IAsyncDisposable
 {
     /// <summary>Hosts a sandboxed app may still reach, so people can sign in. Nothing else leaves the machine.</summary>
     public static readonly string[] SignInHosts = ["login.microsoftonline.com", "login.microsoft.com", "login.windows.net", "sts.windows.net"];
@@ -76,7 +76,7 @@ public sealed class SandboxServer : IAsyncDisposable
                     if (!exact.TryGetValue(key, out var list)) exact[key] = list = [];
                     list.Add(recorded);
                     // Later answers win within a recording; earlier recordings (the preferred one) win across them.
-                    var similar = SimilarKey(uri.Authority, method, uri.AbsolutePath, body?.Request);
+                    var similar = SimilarKey(uri.Authority, method, uri.AbsolutePath + uri.Query, body?.Request);
                     if (!_similar.TryGetValue(similar, out var prior) || prior.From == process.Name) _similar[similar] = recorded;
                 }
             foreach (var (key, list) in exact) _exact.TryAdd(key, list);
@@ -92,8 +92,24 @@ public sealed class SandboxServer : IAsyncDisposable
     private static string ExactKey(string host, string method, string pathAndQuery, string? body) =>
         $"{host.ToLowerInvariant()}|{method.ToUpperInvariant()}|{pathAndQuery}|{RequestShape.Signature(body)}";
 
-    private static string SimilarKey(string host, string method, string path, string? body) =>
-        $"{host.ToLowerInvariant()}|{method.ToUpperInvariant()}|{path}|{RequestShape.Intent(body)}";
+    /// <summary>
+    /// What makes two calls "the same kind of question": host, method, path, the command in the body, and the query
+    /// values that choose what is asked (target=Employers) rather than about whom (targetId=NS0001).
+    /// </summary>
+    private static string SimilarKey(string host, string method, string pathAndQuery, string? body)
+    {
+        var cut = pathAndQuery.IndexOf('?');
+        var path = cut < 0 ? pathAndQuery : pathAndQuery[..cut];
+        var chosen = cut < 0 ? "" : string.Join("&", pathAndQuery[(cut + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(pair => pair.Split('=', 2))
+            .Where(kv => CommandParameter().IsMatch(Uri.UnescapeDataString(kv[0])))
+            .Select(kv => Uri.UnescapeDataString(kv[0]).ToLowerInvariant() + "=" + (kv.Length > 1 ? Uri.UnescapeDataString(kv[1]) : ""))
+            .Order(StringComparer.Ordinal));
+        return $"{host.ToLowerInvariant()}|{method.ToUpperInvariant()}|{path}|{chosen}|{RequestShape.Intent(body)}";
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^(target|command|targetCommand|action|method|type|kind|procedure|sp|query|report|operation)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    private static partial System.Text.RegularExpressions.Regex CommandParameter();
 
     public static async Task<SandboxServer> StartAsync(IReadOnlyList<SavedProcess> processes, string? preferredId)
     {
@@ -138,7 +154,7 @@ public sealed class SandboxServer : IAsyncDisposable
             }
             source = "recording";
         }
-        else if (_similar.TryGetValue(SimilarKey(authority, method, path, body), out var similar))
+        else if (_similar.TryGetValue(SimilarKey(authority, method, pathAndQuery, body), out var similar))
         {
             answer = similar;
             source = "similar";
