@@ -790,3 +790,6 @@ a.repo-item { text-decoration: none; color: inherit; }
 @media (prefers-reduced-motion: reduce) { .pmap-edge.hot { animation: none; } }
 .disc-steps-title { margin: 4px 0 10px; font-size: 13px; color: var(--text-2); }
 .disc-mapbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 14px; }
+.sample-edit { height: 22px; padding: 0 8px; margin-left: 8px; font-size: 11.5px; }
+.sample-editor { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 10px; padding: 10px; border-radius: 10px; background: var(--surface-3); }
+.sample-editor textarea { height: auto; padding: 8px 10px; font-size: 12px; line-height: 1.45; resize: vertical; }

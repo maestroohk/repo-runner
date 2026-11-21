@@ -20,7 +20,34 @@ public sealed partial class SandboxServer : IAsyncDisposable
 
     /// <param name="Source">read (a lookup answered by the real server) | recording (the same question) | similar (the same command, other inputs) | synthetic</param>
     /// <param name="Into">When a copy of the call was also passed to another sandboxed app on this machine: where.</param>
-    public sealed record Hit(DateTime At, string Method, string Host, string Label, string Source, int Status, string? From, string? Into = null, string? Problem = null);
+    /// <param name="Key">Which kind of question it was; a made-up answer is edited and kept under it.</param>
+    public sealed record Hit(DateTime At, string Method, string Host, string Label, string Source, int Status, string? From, string? Into = null, string? Problem = null, string? Key = null);
+
+    /// <summary>
+    /// The app's code, once read: it says what each call expects back, so a lookup nobody can answer gets a made-up
+    /// answer of the right shape instead of "nothing found". Set a little after the sandbox starts.
+    /// </summary>
+    public CodeIndex? Code
+    {
+        get => _code;
+        set
+        {
+            _code = value;
+            if (value is null) return;
+            lock (_pool) foreach (var (name, constant) in value.Constants) Remember(name, constant);
+        }
+    }
+    private CodeIndex? _code;
+
+    /// <summary>Values seen for each field name, in recordings and in the code: what made-up answers are filled with.</summary>
+    private readonly Dictionary<string, List<string>> _pool = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _madeUp = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Taught> _taught = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _downUntil = new(StringComparer.OrdinalIgnoreCase);
+    private string? _dataFile;
+
+    /// <summary>An answer someone wrote or corrected for a kind of question, kept for every later run.</summary>
+    public sealed record Taught(string Method, string Host, string Label, string Body);
 
     /// <summary>
     /// Where to pass a copy of a call, so another app of yours, also running in the sandbox here, can be traced
@@ -36,7 +63,20 @@ public sealed partial class SandboxServer : IAsyncDisposable
     /// </summary>
     public bool ReadThrough { get; set; }
 
-    private static readonly HttpClient Real = new(new SocketsHttpHandler { UseCookies = false, AllowAutoRedirect = false })
+    /// <summary>True when an answer says it failed: an errorCode other than 0 (OpsApi's "100, nothing found" included).</summary>
+    private static bool ReportsError(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body) || body.TrimStart() is not ['{', ..]) return false;
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(body) as System.Text.Json.Nodes.JsonObject;
+            var code = node?.FirstOrDefault(p => p.Key.Equals("errorCode", StringComparison.OrdinalIgnoreCase)).Value?.ToString();
+            return code is not null && code is not ("0" or "00" or "000" or "");
+        }
+        catch (System.Text.Json.JsonException) { return false; }
+    }
+
+    private static readonly HttpClient Real = new(new SocketsHttpHandler { UseCookies = false, AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(5) })
     {
         Timeout = TimeSpan.FromSeconds(60),
     };
@@ -85,8 +125,11 @@ public sealed partial class SandboxServer : IAsyncDisposable
                     if (!Uri.TryCreate(step.Tag("rr.url", "url.full", "http.url"), UriKind.Absolute, out var uri)) continue;
                     flow.Bodies.TryGetValue(step.Id, out var body);
                     if (body?.Response is null && step.StatusCode is null) continue;
+                    // A recorded failure is not worth replaying: a made-up answer of the right shape serves the app better.
+                    if (step.StatusCode >= 400 || ReportsError(body?.Response)) continue;
                     var method = step.Tag("http.request.method", "http.method") ?? "GET";
                     var recorded = new Recorded(step.StatusCode ?? 200, body?.ResponseType, body?.Response, process.Name);
+                    lock (_pool) { Collect(body?.Request); Collect(body?.Response); }
                     var key = ExactKey(uri.Authority, method, uri.PathAndQuery, body?.Request);
                     if (!exact.TryGetValue(key, out var list)) exact[key] = list = [];
                     list.Add(recorded);
@@ -163,18 +206,32 @@ public sealed partial class SandboxServer : IAsyncDisposable
         // Your own app running in the sandbox here (a local OpsApi) answers first: it is fenced in too, so
         // whatever it is asked, changes included, goes no further than this machine.
         string? into = null;
-        if (MirrorTo?.Invoke(method, pathAndQuery) is { } local && local.IsLoopback)
+        var kind = SimilarKey(authority, method, pathAndQuery, body);
+        var reads = !CallSafety.Writes(method, label);
+        Taught? taught;
+        lock (_taught) _taught.TryGetValue(kind, out taught);
+        if (taught is not null)
+        {
+            real = new Recorded(200, "application/json", taught.Body, "your sandbox data");
+            source = "taught";
+        }
+        if (real is null && MirrorTo?.Invoke(method, pathAndQuery) is { } local && local.IsLoopback)
         {
             into = local.GetLeftPart(UriPartial.Authority);
             (real, problem) = await AskLocal(local, method, body, context.Request);
+            // A local app that fails (it cannot reach its database in the sandbox) has not answered.
+            if (real is { Status: >= 500 }) { problem = $"your app running here failed ({real.Status})"; real = null; }
             if (real is not null) source = "local";
         }
-        if (real is null && ReadThrough && !CallSafety.Writes(method, label))
+        if (real is null && ReadThrough && reads && !IsDown(authority))
+        {
             (real, problem) = await ReadReal(scheme, authority, pathAndQuery, method, body, context.Request);
+            if (real is null) MarkDown(authority);
+            else source = "read";
+        }
         if (real is not null)
         {
             answer = real;
-            if (source != "local") source = "read";
         }
         else if (_exact.TryGetValue(exactKey, out var list))
         {
@@ -187,10 +244,15 @@ public sealed partial class SandboxServer : IAsyncDisposable
             }
             source = "recording";
         }
-        else if (_similar.TryGetValue(SimilarKey(authority, method, pathAndQuery, body), out var similar))
+        else if (_similar.TryGetValue(kind, out var similar))
         {
             answer = similar;
             source = "similar";
+        }
+        else if (reads && MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent) is { } invented)
+        {
+            answer = new Recorded(200, "application/json", invented, "made up from the code");
+            source = "madeup";
         }
 
         int status;
@@ -213,7 +275,122 @@ public sealed partial class SandboxServer : IAsyncDisposable
                 ? new { errorCode = "0", errorDescription = "Accepted by the RepoRunner sandbox. Nothing was saved or sent.", sandbox = true }
                 : new { errorCode = "100", errorDescription = "No data found. The RepoRunner sandbox has no recorded answer for this call.", sandbox = true });
         }
-        lock (_hits) _hits.Add(new Hit(DateTime.Now, method, authority, label, source, status, answer?.From, into, problem));
+        lock (_hits) _hits.Add(new Hit(DateTime.Now, method, authority, label, source, status, answer?.From, into, problem, kind));
+    }
+
+    // ---------- made-up and kept answers ----------
+
+    /// <summary>
+    /// An answer of the shape the app's code expects for this question, filled with values the app is known to use.
+    /// The same question gets the same answer for the rest of the run, so it can be looked at and corrected.
+    /// </summary>
+    private string? MadeUp(string kind, string method, string path, string? target, string? intent)
+    {
+        lock (_madeUp) if (_madeUp.TryGetValue(kind, out var known)) return known;
+        if (Code is not { } code) return null;
+        var command = target ?? intent ?? path.TrimEnd('/').Split('/')[^1];
+        if (code.ResponseTypeFor(command) is not { } type) return null;
+        IReadOnlyList<string> Known(string field)
+        {
+            lock (_pool) return _pool.TryGetValue(Norm(field), out var list) ? list.ToList() : [];
+        }
+        var json = code.Sample(type, Known)?.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        if (json is null) return null;
+        lock (_madeUp) _madeUp[kind] = json;
+        return json;
+    }
+
+    /// <summary>The answer last given for a kind of question, for someone to read or correct.</summary>
+    public string? AnswerFor(string kind)
+    {
+        lock (_taught) if (_taught.TryGetValue(kind, out var taught)) return taught.Body;
+        lock (_madeUp) return _madeUp.GetValueOrDefault(kind);
+    }
+
+    /// <summary>Keeps an answer for a kind of question: used from now on, and in later runs.</summary>
+    public void Teach(Hit hit, string body)
+    {
+        if (hit.Key is null) return;
+        lock (_taught)
+        {
+            _taught[hit.Key] = new Taught(hit.Method, hit.Host, hit.Label, body);
+            if (_dataFile is null) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(_dataFile)!);
+            File.WriteAllText(_dataFile, System.Text.Json.JsonSerializer.Serialize(_taught, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        }
+    }
+
+    /// <summary>Where kept answers live for this repo; loads what is there.</summary>
+    public void KeepDataIn(string file)
+    {
+        _dataFile = file;
+        try
+        {
+            if (!File.Exists(file)) return;
+            var kept = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, Taught>>(File.ReadAllText(file));
+            if (kept is null) return;
+            lock (_taught) foreach (var (key, value) in kept) _taught[key] = value;
+        }
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException) { }
+    }
+
+    public int Kept { get { lock (_taught) return _taught.Count; } }
+
+    private static string Norm(string field)
+    {
+        var f = field.ToLowerInvariant();
+        if (f.StartsWith("p_")) f = f[2..];
+        return f.Replace("_", "");
+    }
+
+    private void Remember(string field, string value)
+    {
+        if (value.Length is 0 or > 80) return;
+        var key = Norm(field);
+        if (!_pool.TryGetValue(key, out var list)) _pool[key] = list = [];
+        if (list.Count < 40 && !list.Contains(value)) list.Add(value);
+    }
+
+    /// <summary>Every field and value in a recorded body, including a generic request's paramNames paired with its paramValues.</summary>
+    private void Collect(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json) || json.TrimStart() is not ['{' or '[', ..]) return;
+        try { Walk(System.Text.Json.Nodes.JsonNode.Parse(json), 0); }
+        catch (System.Text.Json.JsonException) { }
+    }
+
+    private void Walk(System.Text.Json.Nodes.JsonNode? node, int depth)
+    {
+        if (node is null || depth > 8) return;
+        if (node is System.Text.Json.Nodes.JsonArray array)
+        {
+            foreach (var item in array.Take(60)) Walk(item, depth + 1);
+            return;
+        }
+        if (node is not System.Text.Json.Nodes.JsonObject obj) return;
+        if (obj["paramNames"] is System.Text.Json.Nodes.JsonArray names && obj["paramValues"] is System.Text.Json.Nodes.JsonArray given)
+            for (var i = 0; i < Math.Min(names.Count, given.Count); i++)
+                if (names[i]?.ToString() is { } n && given[i]?.ToString() is { } v) Remember(n, v);
+        foreach (var (name, value) in obj)
+        {
+            if (value is System.Text.Json.Nodes.JsonValue leaf) { if (leaf.ToString() is { Length: > 0 } text) Remember(name, text); }
+            else Walk(value, depth + 1);
+        }
+        // A string holding JSON (OpsApi's formatted results) is looked into too.
+        foreach (var (_, value) in obj)
+            if (value is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var s) && s.TrimStart() is ['{' or '[', ..])
+                Collect(s);
+    }
+
+    private bool IsDown(string host)
+    {
+        lock (_downUntil) return _downUntil.TryGetValue(host, out var until) && until > DateTime.UtcNow;
+    }
+
+    /// <summary>A server that did not answer is left alone for two minutes, so every lookup does not wait on it again.</summary>
+    private void MarkDown(string host)
+    {
+        lock (_downUntil) _downUntil[host] = DateTime.UtcNow.AddMinutes(2);
     }
 
     /// <summary>Asks the real server a lookup on the app's behalf, with the app's own headers. Null if it cannot be reached.</summary>

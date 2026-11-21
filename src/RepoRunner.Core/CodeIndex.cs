@@ -40,9 +40,15 @@ public sealed partial class CodeIndex
         public List<MethodInfo> Methods { get; } = [];
         /// <summary>For a Razor component: the components its markup places, by tag name.</summary>
         public HashSet<string> Uses { get; } = new(StringComparer.Ordinal);
+        /// <summary>Public properties with their full declared type and the name they have in JSON, for making sample data.</summary>
+        public List<(string Name, TypeSyntax Type, string? JsonName)> Properties { get; } = [];
+        public List<string> TypeParameters { get; } = [];
     }
 
-    private sealed record MethodInfo(string Name, int Parameters, SyntaxNode Body, string File, int LineOffset, Dictionary<string, string> ParameterTypes);
+    private sealed record MethodInfo(string Name, int Parameters, SyntaxNode Body, string File, int LineOffset, Dictionary<string, string> ParameterTypes)
+    {
+        public List<string> TypeParameters { get; init; } = [];
+    }
 
     private static readonly HashSet<string> HttpCalls = new(StringComparer.Ordinal)
     {
@@ -202,6 +208,8 @@ public sealed partial class CodeIndex
             var typeName = declaration.Identifier.Text;
             var info = typeName == component ? TypeFor(ComponentKey(file), typeName) : TypeFor(typeName);
             foreach (var baseType in declaration.BaseList?.Types ?? default) info.Bases.Add(Simple(baseType.Type));
+            if (info.TypeParameters.Count == 0 && declaration.TypeParameterList is { } typeParameters)
+                info.TypeParameters.AddRange(typeParameters.Parameters.Select(t => t.Identifier.Text));
             foreach (var parameter in declaration.ParameterList?.Parameters ?? default)
                 if (parameter.Type is not null) info.Members[parameter.Identifier.Text] = Simple(parameter.Type);
 
@@ -220,6 +228,9 @@ public sealed partial class CodeIndex
                         break;
                     case PropertyDeclarationSyntax property:
                         info.Members[property.Identifier.Text] = Simple(property.Type);
+                        if (property.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword)) && !property.Modifiers.Any(m => m.IsKind(SyntaxKind.StaticKeyword))
+                            && !info.Properties.Any(p => p.Name == property.Identifier.Text))
+                            info.Properties.Add((property.Identifier.Text, property.Type, JsonName(property.AttributeLists)));
                         if (Literal(property.Initializer?.Value ?? property.ExpressionBody?.Expression) is { } fixedValue
                             && property.Modifiers.Any(m => m.IsKind(SyntaxKind.StaticKeyword)))
                             _constants[typeName + "." + property.Identifier.Text] = fixedValue;
@@ -231,7 +242,10 @@ public sealed partial class CodeIndex
                     case MethodDeclarationSyntax method when ((SyntaxNode?)method.Body ?? method.ExpressionBody) is { } body:
                         info.Methods.Add(new MethodInfo(method.Identifier.Text, method.ParameterList.Parameters.Count, body, file, lineOffset,
                             method.ParameterList.Parameters.Where(p => p.Type is not null)
-                                .ToDictionary(p => p.Identifier.Text, p => Simple(p.Type!), StringComparer.Ordinal)));
+                                .ToDictionary(p => p.Identifier.Text, p => Simple(p.Type!), StringComparer.Ordinal))
+                        {
+                            TypeParameters = method.TypeParameterList?.Parameters.Select(t => t.Identifier.Text).ToList() ?? [],
+                        });
                         break;
                 }
             }

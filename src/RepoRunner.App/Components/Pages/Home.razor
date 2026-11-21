@@ -3857,6 +3857,9 @@
                 server = await SandboxServer.StartAsync(recordings, preferredRecording);
                 server.MirrorTo = CopyTarget(repo!, repos);
                 server.ReadThrough = true;
+                server.KeepDataIn(System.IO.Path.Combine(Vaults.Use(v => v.RecordingsFolder(current)), "sandbox-data.json"));
+                var codeRoot = current.Path;
+                _ = Task.Run(() => { try { server.Code = CodeIndex.Build(codeRoot); } catch (Exception) { } });
             }
             shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug", sandbox: server);
             tab = "output";
@@ -3906,6 +3909,7 @@
         var recorded = hits.Count(h => h.Source is "recording" or "similar");
         var read = hits.Count(h => h.Source == "read");
         var local = hits.Count(h => h.Source == "local");
+        var madeUp = hits.Count(h => h.Source is "madeup" or "taught");
         var kept = hits.Count(h => h.Source != "read" && CallSafety.Writes(h.Method, h.Label));
         var standIn = hits.Count(h => h.Source == "synthetic");
         <div class="sandbox-facts">
@@ -3923,6 +3927,10 @@
             }
             <span class="fact" title="Lookups answered by the real server: reading only, nothing changed">Looked up <b>@read</b></span>
             <span class="fact" title="Calls that would save, approve, send or delete. RepoRunner answered them; nothing was sent.">Changes held back <b>@kept</b></span>
+            @if (madeUp > 0)
+            {
+                <span class="fact" title="Lookups nobody could answer, given made-up data of the shape the app expects. Open Details to see or correct it.">Made-up answers <b>@madeUp</b></span>
+            }
             @if (local > 0)
             {
                 <span class="fact" title="Calls answered by another of your apps running in the sandbox on this machine">Answered locally <b>@local</b></span>
@@ -3940,7 +3948,31 @@
                     <summary>Details</summary>
                     @foreach (var group in hits.GroupBy(h => (h.Source, h.Method, h.Label)).OrderByDescending(g => g.Count()).Take(40))
                     {
-                        <div class="mono miss">@SourceWord(group.Key.Source) · @group.Key.Method @group.Key.Label@(group.Count() > 1 ? $"  ×{group.Count()}" : "")</div>
+                        <div class="mono miss">
+                            @SourceWord(group.Key.Source) · @group.Key.Method @group.Key.Label@(group.Count() > 1 ? $"  ×{group.Count()}" : "")
+                            @if (group.Key.Source is "madeup" or "taught" && group.Last() is var madeHit)
+                            {
+                                <button class="btn small sample-edit" @onclick="() => EditSample(session, madeHit)"><Icon Name="pencil" Size="11" /> @(sampleHit == madeHit ? "Editing" : "See or change")</button>
+                            }
+                        </div>
+                        @if (sampleHit is not null && group.Contains(sampleHit))
+                        {
+                            <div class="sample-editor">
+                                <div class="flow-meta">
+                                    This is what the sandbox answers to <b>@sampleHit.Label</b>. It was made up to fit what the app's code expects. Change any value
+                                    (names, codes, amounts) and save: it is kept for this repo and used from now on, in every sandboxed run.
+                                </div>
+                                <textarea class="input mono" rows="14" @bind="sampleText"></textarea>
+                                @if (sampleError is not null)
+                                {
+                                    <div class="bad-text">@sampleError</div>
+                                }
+                                <div class="row">
+                                    <button class="btn primary small" @onclick="() => SaveSample(session)">Keep this answer</button>
+                                    <button class="btn small" @onclick="() => sampleHit = null">Close</button>
+                                </div>
+                            </div>
+                        }
                         @if (group.Select(h => h.Problem).LastOrDefault(p => p is not null) is { } why)
                         {
                             <div class="mono miss warn-text">  could not look it up on @group.First().Host: @why</div>
@@ -3955,10 +3987,33 @@
         </div>
     };
 
+    private SandboxServer.Hit? sampleHit;
+    private string sampleText = "";
+    private string? sampleError;
+
+    private void EditSample(RunSession session, SandboxServer.Hit hit)
+    {
+        if (sampleHit == hit) { sampleHit = null; return; }
+        sampleHit = hit;
+        sampleError = null;
+        sampleText = hit.Key is null ? "" : session.Sandbox?.AnswerFor(hit.Key) ?? "";
+    }
+
+    private void SaveSample(RunSession session)
+    {
+        try { System.Text.Json.Nodes.JsonNode.Parse(sampleText); }
+        catch (System.Text.Json.JsonException ex) { sampleError = "That is not valid JSON: " + ex.Message; return; }
+        session.Sandbox?.Teach(sampleHit!, sampleText);
+        sampleHit = null;
+        Say("Kept. The sandbox gives this answer from now on; reload the page in the app to see it.");
+    }
+
     private static string SourceWord(string source) => source switch
     {
         "read" => "looked up on the real server",
         "local" => "answered by your app running here",
+        "madeup" => "made-up answer (from the code)",
+        "taught" => "your sandbox data",
         "recording" => "recorded answer",
         "similar" => "recorded answer to a similar call",
         _ => "stand-in answer",
