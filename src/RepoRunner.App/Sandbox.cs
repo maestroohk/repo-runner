@@ -41,6 +41,8 @@ public sealed partial class SandboxServer : IAsyncDisposable
 
     /// <summary>Values seen for each field name, in recordings and in the code: what made-up answers are filled with.</summary>
     private readonly Dictionary<string, List<string>> _pool = new(StringComparer.Ordinal);
+    /// <summary>Recorded rows by an identifying field and value: ("resourcecode", "RCU.DASHBOARD") → every field of that row.</summary>
+    private readonly Dictionary<(string, string), Dictionary<string, string>> _rows = [];
     private readonly Dictionary<string, string> _madeUp = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Taught> _taught = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> _downUntil = new(StringComparer.OrdinalIgnoreCase);
@@ -166,6 +168,9 @@ public sealed partial class SandboxServer : IAsyncDisposable
         return $"{host.ToLowerInvariant()}|{method.ToUpperInvariant()}|{path}|{chosen}|{RequestShape.Intent(body)}";
     }
 
+    [System.Text.RegularExpressions.GeneratedRegex(@"Permission|Role|Access|Grant|Resource|Capabilit|Scope|Privilege|Entitle", System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    private static partial System.Text.RegularExpressions.Regex AccessLookup();
+
     [System.Text.RegularExpressions.GeneratedRegex(@"^(target|command|targetCommand|action|method|type|kind|procedure|sp|query|report|operation)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
     private static partial System.Text.RegularExpressions.Regex CommandParameter();
 
@@ -229,6 +234,18 @@ public sealed partial class SandboxServer : IAsyncDisposable
             if (real is null) MarkDown(authority);
             else source = "read";
         }
+        // Who may do what: in the sandbox you may do everything. A recording of someone else's access would lock you
+        // out, so access lookups get a made-up answer granting every resource the code knows (the real server, when
+        // it answers, still wins above).
+        if (real is null && reads && AccessLookup().IsMatch(label))
+        {
+            if (MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent, body) is { } open)
+            {
+                real = new Recorded(200, "application/json", open, "made up: in the sandbox you have every permission");
+                source = "madeup";
+            }
+            else problem = Code is null ? "the app's code is still being read" : Code.LastSampleError ?? $"no call in the code names {label}";
+        }
         if (real is not null)
         {
             answer = real;
@@ -249,7 +266,7 @@ public sealed partial class SandboxServer : IAsyncDisposable
             answer = similar;
             source = "similar";
         }
-        else if (MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent) is { } invented)
+        else if (MadeUp(kind, method, path, context.Request.Query["target"].FirstOrDefault(), intent, body) is { } invented)
         {
             // A change is still not sent anywhere; it just gets an answer the app can read, like a lookup does.
             answer = new Recorded(200, "application/json", invented, reads ? "made up from the code" : "held back; answer made up from the code");
@@ -285,7 +302,7 @@ public sealed partial class SandboxServer : IAsyncDisposable
     /// An answer of the shape the app's code expects for this question, filled with values the app is known to use.
     /// The same question gets the same answer for the rest of the run, so it can be looked at and corrected.
     /// </summary>
-    private string? MadeUp(string kind, string method, string path, string? target, string? intent)
+    private string? MadeUp(string kind, string method, string path, string? target, string? intent, string? request = null)
     {
         lock (_madeUp) if (_madeUp.TryGetValue(kind, out var known)) return known;
         if (Code is not { } code) return null;
@@ -295,11 +312,42 @@ public sealed partial class SandboxServer : IAsyncDisposable
             .Select(n => string.Join('/', segments[^n..]))).Where(n => !string.IsNullOrEmpty(n)).Distinct();
         var type = names.Select(n => code.ResponseTypeFor(n!)).FirstOrDefault(t => t is not null);
         if (type is null) return null;
+        // What the app just sent comes first: a made-up sign-in for system ACC answers for ACC, as the real one would.
+        var sent = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        lock (_pool)
+        {
+            var saved = new Dictionary<string, List<string>>(_pool);
+            _pool.Clear();
+            Collect(request);
+            foreach (var (k, v) in _pool) sent[k] = v;
+            _pool.Clear();
+            foreach (var (k, v) in saved) _pool[k] = v;
+        }
         IReadOnlyList<string> Known(string field)
         {
-            lock (_pool) return _pool.TryGetValue(Norm(field), out var list) ? list.ToList() : [];
+            var key = Norm(field);
+            // A field called "role" holds what other answers call "roleCode". Codes come first, so a made-up sign-in
+            // and a made-up list of roles name the same role; status-like fields keep their own values.
+            var order = key is "status" or "state" or "error" or "response" or "result" or "message"
+                ? new[] { key, key + "id", key + "name" }
+                : new[] { key + "code", key, key + "id", key + "name" };
+            foreach (var candidate in order)
+            {
+                if (sent.TryGetValue(candidate, out var echoed) && echoed.Count > 0) return echoed;
+                lock (_pool) if (_pool.TryGetValue(candidate, out var list) && list.Count > 0) return list.ToList();
+            }
+            return [];
         }
-        var json = code.Sample(type, Known)?.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        IReadOnlyDictionary<string, string>? RowOf(string field, string value)
+        {
+            lock (_pool)
+            {
+                if (!_rows.TryGetValue((CodeIndex.FieldKey(field), value), out var row)) return null;
+                // What the app sent (this system, this role) still wins over what the recorded row says.
+                return row.Where(p => !sent.ContainsKey(p.Key)).ToDictionary(p => p.Key, p => p.Value);
+            }
+        }
+        var json = code.Sample(type, Known, RowOf)?.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
         if (json is null) return null;
         lock (_madeUp) _madeUp[kind] = json;
         return json;
@@ -353,7 +401,7 @@ public sealed partial class SandboxServer : IAsyncDisposable
         if (value.Length is 0 or > 80) return;
         var key = Norm(field);
         if (!_pool.TryGetValue(key, out var list)) _pool[key] = list = [];
-        if (list.Count < 40 && !list.Contains(value)) list.Add(value);
+        if (list.Count < 400 && !list.Contains(value)) list.Add(value);
     }
 
     /// <summary>Every field and value in a recorded body, including a generic request's paramNames paired with its paramValues.</summary>
@@ -376,11 +424,18 @@ public sealed partial class SandboxServer : IAsyncDisposable
         if (obj["paramNames"] is System.Text.Json.Nodes.JsonArray names && obj["paramValues"] is System.Text.Json.Nodes.JsonArray given)
             for (var i = 0; i < Math.Min(names.Count, given.Count); i++)
                 if (names[i]?.ToString() is { } n && given[i]?.ToString() is { } v) Remember(n, v);
+        var row = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (name, value) in obj)
         {
-            if (value is System.Text.Json.Nodes.JsonValue leaf) { if (leaf.ToString() is { Length: > 0 } text) Remember(name, text); }
+            if (value is System.Text.Json.Nodes.JsonValue leaf)
+            {
+                if (leaf.ToString() is { Length: > 0 } text) { Remember(name, text); row.TryAdd(CodeIndex.FieldKey(name), text); }
+            }
             else Walk(value, depth + 1);
         }
+        foreach (var (field, text) in row)
+            if ((field.EndsWith("code") || field.EndsWith("id") || field.EndsWith("key") || field.EndsWith("no")) && text.Length <= 80)
+                _rows.TryAdd((field, text), row);
         // A string holding JSON (OpsApi's formatted results) is looked into too.
         foreach (var (_, value) in obj)
             if (value is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var s) && s.TrimStart() is ['{' or '[', ..])

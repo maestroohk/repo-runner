@@ -206,7 +206,11 @@ public sealed partial class CodeIndex
         foreach (var declaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
         {
             var typeName = declaration.Identifier.Text;
-            var info = typeName == component ? TypeFor(ComponentKey(file), typeName) : TypeFor(typeName);
+            // A nested class (OpsLoginRespone.Result) is known by its full name: many classes nest a "Result".
+            var outer = string.Join(".", declaration.Ancestors().OfType<TypeDeclarationSyntax>().Reverse().Select(t => t.Identifier.Text));
+            var info = typeName == component ? TypeFor(ComponentKey(file), typeName)
+                : outer.Length > 0 ? TypeFor(outer + "." + typeName, typeName)
+                : TypeFor(typeName);
             foreach (var baseType in declaration.BaseList?.Types ?? default) info.Bases.Add(Simple(baseType.Type));
             if (info.TypeParameters.Count == 0 && declaration.TypeParameterList is { } typeParameters)
                 info.TypeParameters.AddRange(typeParameters.Parameters.Select(t => t.Identifier.Text));
