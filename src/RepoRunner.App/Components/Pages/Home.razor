@@ -1,5 +1,9 @@
 @page "/"
+@page "/repo/{RepoName}"
+@page "/repo/{RepoName}/{Section}"
+@page "/repo/{RepoName}/{Section}/{Item}"
 @page "/flow/{FocusRepo}"
+@inject NavigationManager Nav
 @implements IDisposable
 @inject VaultService Vaults
 @inject SessionManager Sessions
@@ -13,7 +17,7 @@
 
 <div class="rr-app @(Focused ? "focus" : "")">
     <aside class="sidebar">
-        <div class="brand"><span class="logo"><Icon Name="play" Size="12" /></span>RepoRunner</div>
+        <a class="brand" href="" title="All repositories"><span class="logo"><Icon Name="play" Size="12" /></span>RepoRunner</a>
 
         <div class="nav-label">
             Repositories
@@ -23,7 +27,7 @@
         @foreach (var r in repos)
         {
             var running = sessions.Any(s => s.Running && s.Repo == r.Name);
-            <button class="repo-item @(repo?.Id == r.Id ? "active" : "")" @onclick="() => SelectRepo(r)">
+            <a class="repo-item @(repo?.Id == r.Id ? "active" : "")" href="@UrlFor(r)" title="Open @r.Name at its front page">
                 <span class="avatar" style="--hue:@Hue(r.Name)">@Initials(r.Name)</span>
                 <span class="repo-text">
                     <span class="repo-name">@r.Name</span>
@@ -33,7 +37,7 @@
                 {
                     <span class="pulse"></span>
                 }
-            </button>
+            </a>
         }
         @if (repos.Count == 0 && !showAdd)
         {
@@ -77,7 +81,45 @@
     </aside>
 
     <main class="content">
-        @if (repo is null)
+        @if (repo is null && repos.Count > 0)
+        {
+            <div class="content-inner">
+                <nav class="crumbs" aria-label="Where you are"><span class="crumb current"><Icon Name="layers" Size="13" /> All repositories</span></nav>
+                <header class="home-head">
+                    <h1>Your repositories</h1>
+                    <p>Pick one to run it, see how it works inside, or look at what happened in a run.</p>
+                </header>
+                @if (RepoName is not null)
+                {
+                    <div class="callout"><Icon Name="alert" /><div>There is no repository called “@RepoName”. It may have been removed.</div></div>
+                }
+                <div class="home-grid">
+                    @foreach (var r in repos)
+                    {
+                        var running = sessions.Where(x => x.Running && x.Repo == r.Name).ToList();
+                        <a class="home-card" href="@UrlFor(r)">
+                            <span class="avatar lg" style="--hue:@Hue(r.Name)">@Initials(r.Name)</span>
+                            <span class="home-card-text">
+                                <b>@r.Name</b>
+                                <span class="path">@r.Path</span>
+                                <span class="home-card-state">
+                                    @if (running.Count > 0)
+                                    {
+                                        <span class="live-pill small"><span class="pulse"></span> running on @running[0].Env@(running[0].Sandbox is not null ? " · sandbox" : "")</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="flow-meta">Not running@(r.DefaultEnv is { } e ? $" · last used on {e}" : "")</span>
+                                    }
+                                </span>
+                            </span>
+                            <Icon Name="next" Size="16" />
+                        </a>
+                    }
+                </div>
+            </div>
+        }
+        else if (repo is null)
         {
             <div class="welcome">
                 <span class="logo"><Icon Name="play" Size="22" /></span>
@@ -89,6 +131,28 @@
         else
         {
             <div class="content-inner">
+                <nav class="crumbs" aria-label="Where you are">
+                    @if (Focused)
+                    {
+                        <a class="crumb back" href="@UrlFor(repo, "flow")" title="Back to the full RepoRunner window"><Icon Name="back" Size="13" /> Back to @repo.Name</a>
+                    }
+                    else
+                    {
+                        <a class="crumb" href="" title="All repositories"><Icon Name="layers" Size="13" /> All repositories</a>
+                        <span class="crumb-sep">›</span>
+                        <a class="crumb @(SectionTitle is null ? "current" : "")" href="@UrlFor(repo)" title="Back to the top of @repo.Name">@repo.Name</a>
+                        @if (SectionTitle is { } sectionTitle)
+                        {
+                            <span class="crumb-sep">›</span>
+                            <a class="crumb @(ItemTitle is null ? "current" : "")" href="@UrlFor(repo, tab)">@sectionTitle</a>
+                        }
+                        @if (ItemTitle is { } itemTitle)
+                        {
+                            <span class="crumb-sep">›</span>
+                            <span class="crumb current">@itemTitle</span>
+                        }
+                    }
+                </nav>
                 @if (Focused)
                 {
                     <div class="focus-bar">
@@ -105,7 +169,7 @@
                         }
                         <span class="spacer"></span>
                         <div class="seg">
-                            <button class="seg-opt @(tab == "processes" ? "active" : "")" @onclick="@(() => tab = "processes")">Processes</button>
+                            <button class="seg-opt @(tab == "processes" ? "active" : "")" @onclick="@(() => tab = "processes")">Recordings</button>
                             <button class="seg-opt @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">Live map</button>
                             <button class="seg-opt @(tab == "features" ? "active" : "")" @onclick="@(() => tab = "features")">Features and code paths</button>
                         </div>
@@ -262,18 +326,18 @@
 
                 <section class="panel">
                     <div class="panel-tabs" role="tablist">
-                        <button class="ptab @(tab == "vars" ? "active" : "")" @onclick="@(() => tab = "vars")">
+                        <button class="ptab @(tab == "vars" ? "active" : "")" @onclick="@(() => ShowTab("vars"))">
                             <Icon Name="key" /> Variables <span class="tab-count">@(locked ? "–" : vars.Count.ToString())</span>
                         </button>
-                        <button class="ptab @(tab == "output" ? "active" : "")" @onclick="@(() => tab = "output")">
+                        <button class="ptab @(tab == "output" ? "active" : "")" @onclick="@(() => ShowTab("output"))">
                             <Icon Name="terminal" /> Output
                             @if (RepoSessions.Any(s => s.Running))
                             {
                                 <span class="pulse"></span>
                             }
                         </button>
-                        <button class="ptab @(tab == "processes" ? "active" : "")" @onclick="@(() => tab = "processes")">
-                            <Icon Name="layers" /> Processes
+                        <button class="ptab @(tab == "processes" ? "active" : "")" @onclick="@(() => ShowTab("processes"))">
+                            <Icon Name="layers" /> Recordings
                             @if (recordingSince is not null)
                             {
                                 <span class="rec-dot on"></span>
@@ -287,7 +351,7 @@
                                 <span class="tab-count">@saved.Count</span>
                             }
                         </button>
-                        <button class="ptab @(tab == "flow" ? "active" : "")" @onclick="@(() => tab = "flow")">
+                        <button class="ptab @(tab == "flow" ? "active" : "")" @onclick="@(() => ShowTab("flow"))">
                             <Icon Name="flow" /> Live map
                             @if (AllFlows.Count(f => f.Outcome == "failed") is > 0 and var failedFlows)
                             {
@@ -298,14 +362,14 @@
                                 <span class="pulse"></span>
                             }
                         </button>
-                        <button class="ptab @(tab == "features" ? "active" : "")" @onclick="@(() => tab = "features")">
+                        <button class="ptab @(tab == "features" ? "active" : "")" @onclick="@(() => ShowTab("features"))">
                             <Icon Name="code" /> Features
                             @if (scan is not null)
                             {
                                 <span class="tab-count">@scan.Features.Count</span>
                             }
                         </button>
-                        <button class="ptab @(tab == "files" ? "active" : "")" @onclick="@(() => tab = "files")">
+                        <button class="ptab @(tab == "files" ? "active" : "")" @onclick="@(() => ShowTab("files"))">
                             <Icon Name="file" /> Plaintext files
                             @if (files.Count > 0)
                             {
@@ -1532,8 +1596,119 @@
         }, null, 500, 500);
     }
 
+    // ---------- where you are: the address bar ----------
+
+    [Parameter] public string? RepoName { get; set; }
+    [Parameter] public string? Section { get; set; }
+    [Parameter] public string? Item { get; set; }
+
+    /// <summary>Each tab's address word and the name people see.</summary>
+    private static readonly (string Tab, string Slug, string Title)[] Sections =
+    [
+        ("vars", "variables", "Variables"),
+        ("output", "output", "Output"),
+        ("features", "features", "Features"),
+        ("processes", "recordings", "Recordings"),
+        ("flow", "map", "Live map"),
+        ("files", "files", "Plaintext files"),
+    ];
+
+    private string? appliedRoute;
+    private string? pendingFeature;
+
+    private static string Slug(string tab) => Sections.FirstOrDefault(x => x.Tab == tab).Slug ?? tab;
+
+    private string UrlFor(RepoInfo r, string? tabKey = null, string? item = null) =>
+        "repo/" + Uri.EscapeDataString(r.Name)
+        + (tabKey is null ? "" : "/" + Slug(tabKey))
+        + (item is null ? "" : "/" + Uri.EscapeDataString(item));
+
+    /// <summary>Null on a repo's front page, which shows its run targets and the tab it opened on.</summary>
+    private string? SectionTitle => showingSection ? Sections.FirstOrDefault(x => x.Tab == tab).Title : null;
+    private bool showingSection;
+
+    private string? ItemTitle => tab switch
+    {
+        "processes" => saved.FirstOrDefault(x => x.Id == procId)?.Name,
+        "features" => codeFeature is null ? null : codeFeature.Route ?? codeFeature.Name,
+        "flow" => flowId is null ? null : "One request",
+        _ => null,
+    };
+
+    private string? ItemKey => tab switch
+    {
+        "processes" => procId,
+        "features" => codeFeature is null ? null : FeatureKey(codeFeature),
+        "flow" => flowId,
+        _ => null,
+    };
+
+    private static string FeatureKey(Feature f) => $"{f.Kind}:{f.Route ?? f.Name}";
+
+    /// <summary>The address that shows what is on screen now.</summary>
+    private string CurrentRoute() =>
+        repo is null ? "" : showingSection || ItemKey is not null ? UrlFor(repo, tab, ItemKey) : UrlFor(repo);
+
+    protected override void OnParametersSet()
+    {
+        if (Focused) return;
+        var route = RepoName is null ? "" : "repo/" + Uri.EscapeDataString(RepoName)
+            + (Section is null ? "" : "/" + Section) + (Item is null ? "" : "/" + Uri.EscapeDataString(Item));
+        if (route == appliedRoute) return;
+        appliedRoute = route;
+
+        if (RepoName is null)
+        {
+            repo = null;
+            LoadRepo();
+            return;
+        }
+        var wanted = repos.FirstOrDefault(r => r.Name.Equals(RepoName, StringComparison.OrdinalIgnoreCase));
+        if (wanted is null) { repo = null; LoadRepo(); return; }
+        if (repo?.Id != wanted.Id) SelectRepo(wanted);
+
+        var section = Sections.FirstOrDefault(x => x.Slug.Equals(Section, StringComparison.OrdinalIgnoreCase));
+        showingSection = section.Tab is not null;
+        if (section.Tab is null)
+        {
+            // The repo's front page: close whatever was open inside it.
+            procId = null;
+            flowId = null;
+            codeFeature = null;
+            tab = RepoSessions.Any(x => x.Running) ? "output" : "vars";
+            return;
+        }
+        tab = section.Tab;
+        switch (tab)
+        {
+            case "processes":
+                procId = Item is not null && saved.Any(x => x.Id == Item) ? Item : null;
+                break;
+            case "flow":
+                if (Item is null) CloseFlow();
+                else if (flowId != Item) OpenFlow(Item, null);
+                break;
+            case "features":
+                if (Item is null) codeFeature = null;
+                else if (scan?.Features.FirstOrDefault(f => FeatureKey(f) == Item) is { } feature) OpenCode(feature);
+                else pendingFeature = Item; // opened once the scan is in
+                break;
+        }
+    }
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        // Keep the address in step with the screen, so Back, Forward and bookmarks work.
+        if (!Focused)
+        {
+            var route = CurrentRoute();
+            var now = Nav.ToBaseRelativePath(Nav.Uri).Split('?', '#')[0];
+            if (!string.Equals(Uri.UnescapeDataString(now), Uri.UnescapeDataString(route), StringComparison.OrdinalIgnoreCase))
+            {
+                appliedRoute = route;
+                Nav.NavigateTo(route, new NavigationOptions { ReplaceHistoryEntry = firstRender || now.Length == 0 && repo is null });
+            }
+        }
         if (tab == "output" && shown is { Running: true }) await JS.InvokeVoidAsync("rrScrollEnd", logElement);
     }
 
@@ -1552,7 +1727,7 @@
         envs = Vaults.Use(v => v.Environments());
         unlocked = Vaults.UnlockedNames();
         sessions = Sessions.All();
-        repo = repo is null ? repos.FirstOrDefault() : repos.FirstOrDefault(r => r.Id == repo.Id) ?? repos.FirstOrDefault();
+        repo = repo is null ? null : repos.FirstOrDefault(r => r.Id == repo.Id);
         LoadRepo();
     }
 
@@ -3288,6 +3463,8 @@
                 if (scanRepoId != id) return;
                 scan = result;
                 pageByFile = null;
+                if (pendingFeature is not null && result.Features.FirstOrDefault(f => FeatureKey(f) == pendingFeature) is { } wanted) OpenCode(wanted);
+                pendingFeature = null;
                 StateHasChanged();
             });
         });
@@ -3625,6 +3802,12 @@
     };
 
     private void StopSession(RunSession session) => Sessions.Stop(session);
+
+    private void ShowTab(string key)
+    {
+        tab = key;
+        showingSection = true;
+    }
 
     private string SolutionOf(TargetDef target) =>
         DebugSupport.FindSolution(repo!, target) is { } full ? System.IO.Path.GetRelativePath(repo!.Path, full) : "";
