@@ -29,8 +29,61 @@ public static partial class FlowRules
     }
 
     /// <summary>A step someone took: a page request, a click, a navigation. Everything else is background.</summary>
+    public const string Round = "Background round ";
+
+    /// <summary>
+    /// A background service has no requests or clicks: its work is calls it starts by itself, round after round.
+    /// When nothing in <paramref name="flows"/> is a step someone took, the calls are grouped into rounds (a pause of
+    /// more than ten seconds starts a new one) and each round becomes one step, with every call of that round in it.
+    /// </summary>
+    public static List<Flow> WithRounds(IEnumerable<Flow> flows)
+    {
+        var all = flows.OrderBy(f => f.FirstSeen).ToList();
+        if (all.Any(IsStage)) return all;
+        var work = all.Where(f => f.Steps.Values.Any(s => s.Category is "http" or "db") || f.Errors.Count > 0).ToList();
+        if (work.Count == 0) return all;
+
+        // Calls, not traces, are what is grouped: a service's whole life is often one trace.
+        var calls = work.SelectMany(f => f.Steps.Values.Where(s => s.Category is "http" or "db").Select(s => (Flow: f, Step: s)))
+            .OrderBy(c => c.Step.Start).ToList();
+        var rounds = new List<Flow>();
+        var ends = new List<DateTime>();
+        foreach (var (flow, step) in calls)
+        {
+            if (rounds.Count == 0 || (step.Start - ends[^1]).TotalSeconds > 10)
+            {
+                var opened = new Flow { TraceId = $"round-{flow.TraceId}-{step.Id}", App = flow.App, FirstSeen = step.Start };
+                opened.Steps["round"] = new FlowStep
+                {
+                    Id = "round", Name = Round + step.Start.ToLocalTime().ToString("HH:mm:ss"), Kind = "Internal", Start = step.Start.AddMilliseconds(-1),
+                };
+                rounds.Add(opened);
+                ends.Add(step.Start);
+            }
+            var round = rounds[^1];
+            round.Steps[step.Id] = step;
+            if (flow.Bodies.TryGetValue(step.Id, out var body)) round.Bodies[step.Id] = body;
+            if (flow.Stacks.TryGetValue(step.Id, out var stack)) round.Stacks[step.Id] = stack;
+            var end = step.Start.AddMilliseconds(step.Ms);
+            if (end > ends[^1]) ends[^1] = end;
+            round.Steps["round"].Ms = (ends[^1] - round.Steps["round"].Start).TotalMilliseconds;
+        }
+        // An exception belongs to the round it happened in: the last one that had started by then.
+        foreach (var error in work.SelectMany(f => f.Errors).OrderBy(e => e.At))
+        {
+            if (rounds.Count == 0)
+            {
+                var alone = new Flow { TraceId = "round-errors", FirstSeen = error.At };
+                alone.Steps["round"] = new FlowStep { Id = "round", Name = Round + error.At.ToLocalTime().ToString("HH:mm:ss"), Kind = "Internal", Start = error.At };
+                rounds.Add(alone);
+            }
+            (rounds.LastOrDefault(r => r.Steps["round"].Start <= error.At.AddSeconds(2)) ?? rounds[0]).Errors.Add(error);
+        }
+        return rounds;
+    }
+
     public static bool IsStage(Flow flow) =>
-        IsRequest(flow) || (flow.Root is { } root && (root.Name.StartsWith("Event ") || root.Name.StartsWith("Route ")
+        IsRequest(flow) || (flow.Root is { } root && (root.Name.StartsWith("Event ") || root.Name.StartsWith("Route ") || root.Name.StartsWith(Round)
             || (root.Name.StartsWith(BlazorHub) && flow.Steps.Count > 1)));
 
     /// <summary>

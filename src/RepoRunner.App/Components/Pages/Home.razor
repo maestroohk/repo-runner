@@ -2373,7 +2373,7 @@
     private List<Flow> ProcessFlows(SavedProcess? opened)
     {
         IEnumerable<Flow> flows = opened?.Flows.Where(f => f.App is null || f.App == opened.Flows[0].App || f.App == repo?.Name)
-            ?? AllFlows.Where(f => !IsChatter(f) && (recordingSince is null || f.FirstSeen >= recordingSince));
+            ?? FlowRules.WithRounds(AllFlows.Where(f => !IsChatter(f) && (recordingSince is null || f.FirstSeen >= recordingSince)));
         if (!showBackground) flows = flows.Where(IsStage);
         var ordered = flows.OrderBy(f => f.FirstSeen).ToList();
         if (showBackground) return ordered;
@@ -2443,7 +2443,7 @@
 
     private void SaveProcess(string name, DateTime since) => Try(() =>
     {
-        var flows = AllFlows.Where(f => f.FirstSeen >= since && !IsChatter(f) && IsStage(f)).OrderBy(f => f.FirstSeen).ToList();
+        var flows = FlowRules.WithRounds(AllFlows.Where(f => f.FirstSeen >= since && !IsChatter(f))).Where(IsStage).OrderBy(f => f.FirstSeen).ToList();
         if (flows.Count == 0) throw new VaultException("Nothing was captured in that time. Use the app while recording.");
         var current = repo!;
         // What your other sandboxed apps did while handling these calls goes with the recording.
