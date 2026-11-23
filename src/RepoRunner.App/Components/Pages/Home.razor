@@ -18,7 +18,10 @@
 
 <div class="rr-app @(Focused ? "focus" : "")">
     <aside class="sidebar">
-        <a class="brand" href="" title="All repositories"><span class="logo"><Icon Name="play" Size="12" /></span>RepoRunner</a>
+        <div class="side-top">
+            <a class="brand" href="" title="All repositories"><span class="logo"><Icon Name="play" Size="12" /></span><span class="brand-name">RepoRunner</span></a>
+            <button class="icon-btn nav-toggle" title="Collapse or expand the menu" aria-label="Collapse or expand the menu" onclick="rrToggleNav()"><Icon Name="layers" Size="15" /></button>
+        </div>
 
         <button class="palette-open" title="Search everything (Ctrl+K)" @onclick="OpenPalette">
             <Icon Name="search" Size="13" /> <span>Search</span> <kbd>Ctrl K</kbd>
@@ -142,7 +145,7 @@
         }
         else
         {
-            <div class="content-inner">
+            <div class="content-inner fit">
                 <nav class="crumbs" aria-label="Where you are">
                     @if (Focused)
                     {
@@ -212,7 +215,7 @@
                 </header>
 
                 @{ var safetyEnv = envs.FirstOrDefault(e => e.Name == envName); }
-                @if (showingSection && !Focused)
+                @if (!Focused)
                 {
                     // Inside a tab the run targets fold into one line, so what was opened starts at the top.
                     var running = RepoSessions.Where(x => x.Running).ToList();
@@ -235,184 +238,15 @@
                             <span class="flow-meta">Nothing running. @(safetyEnv?.Live == true ? $"{envName} is live." : $"Apps started on {envName} run in the sandbox.")</span>
                         }
                         <span class="spacer"></span>
-                        <a class="btn small" href="@UrlFor(repo)">Run targets</a>
+                        <a class="btn small" href="@UrlFor(repo)"><Icon Name="play" Size="11" /> Run</a>
                     </div>
-                }
-                else if (safetyEnv is not null)
-                {
-                    <div class="safety @(safetyEnv.Live ? "live" : "sandboxed")">
-                        <Icon Name="@(safetyEnv.Live ? "globe" : "shield")" Size="18" />
-                        <div class="safety-text">
-                            @if (safetyEnv.Live)
-                            {
-                                <b>@safetyEnv.Name is live.</b>
-                                <span>Apps you start here talk to the real servers of @safetyEnv.Name. What they save is saved for real.</span>
-                            }
-                            else
-                            {
-                                <b>@(safetyEnv.Protected ? "Sandbox: nothing leaves this computer." : "Sandbox: nothing you save, approve or send leaves this computer.")</b>
-                                @if (safetyEnv.Protected)
-                                {
-                                    <span>
-                                        @safetyEnv.Name is protected, so a .NET app started on it reaches none of its servers, not even to look things up.
-                                        RepoRunner answers every call itself, from your recordings or with made-up data. Only signing in to Microsoft goes out.
-                                    </span>
-                                }
-                                else
-                                {
-                                <span>
-                                    When you start a .NET app on @safetyEnv.Name, it can still look things up on @(safetyEnv.Name)'s servers (your access, lists,
-                                    member details), so it works as usual. Anything that would save, approve, send or delete is answered by RepoRunner
-                                    itself: “accepted”, and nothing happens. Direct connections to databases and other systems are refused.
-                                </span>
-                                }
-                            }
-                        </div>
-                        @if (safetyEnv.Live)
-                        {
-                            <button class="btn small" @onclick="() => SetLive(safetyEnv, false)"><Icon Name="shield" Size="13" /> Back to the sandbox</button>
-                        }
-                        else if (!safetyEnv.Protected)
-                        {
-                            <button class="btn small @(confirmKey == "live:" + safetyEnv.Name ? "confirm" : "")" title="Let apps started on this environment reach its real servers"
-                                    @onclick="@(() => Confirm("live:" + safetyEnv.Name, () => SetLive(safetyEnv, true)))">
-                                @(confirmKey == "live:" + safetyEnv.Name ? $"Click again: real servers of {safetyEnv.Name}" : "Allow real servers")
-                            </button>
-                        }
-                    </div>
-                }
-
-                @if (!showingSection || Focused)
-                {
-                @if (!locked && safetyEnv is not null)
-                {
-                    <div class="preflight">
-                        <b>Before you run</b>
-                        @if (safetyEnv.Protected)
-                        {
-                            <span class="flow-meta">@safetyEnv.Name is protected, so its systems are not checked.</span>
-                        }
-                        else if (preflight is null)
-                        {
-                            <span class="flow-meta">@(preflightRunning ? "Checking which systems answer…" : "Not checked yet.")</span>
-                        }
-                        else if (preflight.Count == 0)
-                        {
-                            <span class="flow-meta">No setting on @envName points at another system.</span>
-                        }
-                        else
-                        {
-                            @foreach (var system in preflight)
-                            {
-                                <span class="pre-chip @(system.Up ? "up" : "down")" title="@($"{system.Host}:{system.Port}" + (system.Up ? $", answered in {system.Ms} ms" : ", no answer"))">
-                                    <span class="pre-dot"></span>@system.Names<i>@(system.Up ? "answering" : "not answering")</i>
-                                </span>
-                            }
-                        }
-                        @if (targets.SelectMany(t => t.Requires).Distinct(StringComparer.OrdinalIgnoreCase).Where(k => !vars.Any(x => x.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList() is { Count: > 0 } gone)
-                        {
-                            <span class="pre-chip down" title="@string.Join(", ", gone)"><span class="pre-dot"></span>@gone.Count setting@(gone.Count == 1 ? "" : "s") missing</span>
-                        }
-                        <span class="spacer"></span>
-                        @if (!safetyEnv.Protected)
-                        {
-                            <button class="btn small" disabled="@preflightRunning" @onclick="() => CheckSystems(force: true)"><Icon Name="refresh" Size="12" /> Check again</button>
-                        }
-                    </div>
-                }
-                <section class="targets">
-                    @if (targets.Count == 0)
-                    {
-                        <div class="panel">
-                            <div class="state">
-                                <span class="glyph"><Icon Name="terminal" Size="22" /></span>
-                                <h3>No run targets found</h3>
-                                <p>No runnable .NET project or npm dev script was detected in this folder.</p>
-                            </div>
-                        </div>
-                    }
-                    @foreach (var t in targets)
-                    {
-                        var live = sessions.FirstOrDefault(s => s.Running && s.Repo == repo.Name && s.Target == t.Name);
-                        var missing = locked ? [] : t.Requires.Where(k => !vars.Any(v => v.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList();
-                        <article class="target-card @(live is not null ? "live" : "")">
-                            <div class="target-icon kind-@t.Kind">@(t.Kind == "dotnet" ? ".NET" : t.Kind == "node" ? "npm" : ">_")</div>
-                            <div class="target-body">
-                                <div class="target-title">
-                                    @t.Name
-                                    @if (t.Name.Equals(repo.DefaultTarget, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        <span class="badge accent">default</span>
-                                    }
-                                </div>
-                                <div class="target-sub">
-                                    @(t.Kind == "dotnet" ? t.Project : t.Kind == "node" ? $"npm run {t.Script}" : $"{t.Command} {string.Join(' ', t.Args)}")
-                                    @if (t.Companions.Count > 0)
-                                    {
-                                        <span> · with @string.Join(", ", t.Companions)</span>
-                                    }
-                                </div>
-                                @if (missing.Count > 0)
-                                {
-                                    <div class="target-warn"><Icon Name="alert" Size="14" /> @envName is missing @string.Join(", ", missing)</div>
-                                }
-                                @if (live?.Sandbox is not null)
-                                {
-                                    @SandboxFacts(live)
-                                }
-                                else if (live is null && safetyEnv is { Live: false } && (t.Kind != "dotnet" || t.Companions.Count > 0))
-                                {
-                                    <div class="target-warn" title="RepoRunner can only fence in .NET apps.">
-                                        <Icon Name="alert" Size="14" />
-                                        @(t.Kind != "dotnet" ? "Not a .NET app, so it cannot be sandboxed: it reaches whatever its settings point at." : $"{string.Join(", ", t.Companions)} start alongside and are not sandboxed.")
-                                    </div>
-                                }
-                                @if (t.Kind == "dotnet" && solutions.Count > 1)
-                                {
-                                    <label class="solution-pick" title="Rider attaches in the window that has this solution open. Pick the one you work in.">
-                                        <Icon Name="bug" Size="13" /> Debug with
-                                        <select value="@SolutionOf(t)" @onchange="e => SetSolution(t, e.Value?.ToString())">
-                                            @foreach (var sln in solutions)
-                                            {
-                                                <option value="@sln">@sln@(openInRider.Contains(sln) ? "  (open in Rider)" : "")</option>
-                                            }
-                                        </select>
-                                    </label>
-                                }
-                            </div>
-                            <div class="target-actions">
-                                @if (live is not null)
-                                {
-                                    <span class="live-pill"><span class="pulse"></span> @live.Env · @Elapsed(live)</span>
-                                    @if (live.Url is not null)
-                                    {
-                                        <a class="btn" href="@live.Url" target="_blank" rel="noopener noreferrer" onclick="window.open(this.href, '_blank', 'noopener'); return false;">Open app <Icon Name="external" Size="14" /></a>
-                                    }
-                                    <button class="btn stop" @onclick="() => StopSession(live)"><Icon Name="stop" Size="12" /> Stop</button>
-                                }
-                                else
-                                {
-                                    <button class="btn @(IsConfirming(t, "Run") ? "confirm" : "run")" @onclick="@(() => Run(t, "Run"))">
-                                        <Icon Name="play" Size="12" /> @RunLabel(t, "Run")
-                                    </button>
-                                    @if (t.Kind == "dotnet")
-                                    {
-                                        <button class="btn @(IsConfirming(t, "Debug") ? "confirm" : "")" title="Start paused and attach Rider's debugger" @onclick="@(() => Run(t, "Debug"))">
-                                            <Icon Name="bug" Size="15" /> @RunLabel(t, "Debug")
-                                        </button>
-                                        <button class="btn @(IsConfirming(t, "Watch") ? "confirm" : "")" title="dotnet watch: rebuilds when files change" @onclick="@(() => Run(t, "Watch"))">
-                                            <Icon Name="refresh" Size="14" /> @RunLabel(t, "Watch")
-                                        </button>
-                                    }
-                                }
-                            </div>
-                        </article>
-                    }
-                </section>
                 }
 
                 <section class="panel">
                     <div class="panel-tabs" role="tablist">
+                        <button class="ptab @(tab == "run" ? "active" : "")" title="Start the app, and see how safely it will run" @onclick="@(() => ShowTab("run"))">
+                            <Icon Name="power" /> Run
+                        </button>
                         <button class="ptab @(tab == "vars" ? "active" : "")" @onclick="@(() => ShowTab("vars"))">
                             <Icon Name="key" /> Variables <span class="tab-count">@(locked ? "–" : vars.Count.ToString())</span>
                         </button>
@@ -481,7 +315,11 @@
                         {
                             <p class="tab-hint">@hint</p>
                         }
-                        @if (tab == "found")
+                        @if (tab == "run")
+                        {
+                            @RunZone()
+                        }
+                        else if (tab == "found")
                         {
                             <ProcessesView View="@view" Repo="repo" Entry="Found.For(repo)" Others="OtherMaps()" EnvName="@envName"
                                            KnownSettings="@(locked ? null : vars.Select(v => v.Name).ToHashSet(StringComparer.OrdinalIgnoreCase))"
@@ -1673,7 +1511,7 @@
 
     private sealed record LogLine(string? Tag, int TagIndex, string Text, string Kind);
 
-    private string tab = "vars";
+    private string tab = "run";
     private string? flowId;
     private string? openStep;
     private bool onlyProblems;
@@ -1743,6 +1581,7 @@
     /// <summary>Each tab's address word and the name people see.</summary>
     private static readonly (string Tab, string Slug, string Title)[] Sections =
     [
+        ("run", "run", "Run"),
         ("vars", "variables", "Variables"),
         ("output", "output", "Output"),
         ("found", "processes", "Processes"),
@@ -1817,7 +1656,7 @@
             flowId = null;
             codeFeature = null;
             foundKey = null;
-            tab = RepoSessions.Any(x => x.Running) ? "output" : "vars";
+            tab = RepoSessions.Any(x => x.Running) ? "output" : "run";
             return;
         }
         tab = section.Tab;
@@ -3987,7 +3826,7 @@
         filter = "";
         codeFeature = null;
         LoadRepo();
-        tab = RepoSessions.Any(s => s.Running) ? "output" : "vars";
+        tab = RepoSessions.Any(s => s.Running) ? "output" : "run";
     }
 
     private void SelectEnv(string name)
@@ -4270,6 +4109,7 @@
     /// <summary>What a tab is for, in one sentence anyone can follow.</summary>
     private string? TabHint(string key) => key switch
     {
+        "run" => null,
         "vars" => $"The settings {repo?.Name} is given when RepoRunner starts it (addresses, user names, keys), kept encrypted. Pick the environment at the top to see its values.",
         "output" => "What the app prints while it runs. Errors show here first.",
         "processes" => "Record yourself using the app and RepoRunner keeps every step, every call to another system and every answer, so you can look back, compare two runs or find where it went wrong. Failures are kept by themselves.",
@@ -4277,6 +4117,187 @@
         "features" => "For developers: follow a page or an API through the code, method by method.",
         "files" => "These files hold settings in plain text. They may override what RepoRunner gives the app, and anyone with the folder can read them.",
         _ => null,
+    };
+
+    /// <summary>The Run tab: how safe this environment is, which systems answer, and the targets to start.</summary>
+    private RenderFragment RunZone() => __builder =>
+    {
+        var safetyEnv = envs.FirstOrDefault(e => e.Name == envName);
+        <div class="run-zone">
+                @if (safetyEnv is not null)
+                {
+                    <div class="safety @(safetyEnv.Live ? "live" : "sandboxed")">
+                        <Icon Name="@(safetyEnv.Live ? "globe" : "shield")" Size="18" />
+                        <div class="safety-text">
+                            @if (safetyEnv.Live)
+                            {
+                                <b>@safetyEnv.Name is live.</b>
+                                <span>Apps you start here talk to the real servers of @safetyEnv.Name. What they save is saved for real.</span>
+                            }
+                            else
+                            {
+                                <b>@(safetyEnv.Protected ? "Sandbox: nothing leaves this computer." : "Sandbox: nothing you save, approve or send leaves this computer.")</b>
+                                @if (safetyEnv.Protected)
+                                {
+                                    <span>
+                                        @safetyEnv.Name is protected, so a .NET app started on it reaches none of its servers, not even to look things up.
+                                        RepoRunner answers every call itself, from your recordings or with made-up data. Only signing in to Microsoft goes out.
+                                    </span>
+                                }
+                                else
+                                {
+                                <span>
+                                    When you start a .NET app on @safetyEnv.Name, it can still look things up on @(safetyEnv.Name)'s servers (your access, lists,
+                                    member details), so it works as usual. Anything that would save, approve, send or delete is answered by RepoRunner
+                                    itself: “accepted”, and nothing happens. Direct connections to databases and other systems are refused.
+                                </span>
+                                }
+                            }
+                        </div>
+                        @if (safetyEnv.Live)
+                        {
+                            <button class="btn small" @onclick="() => SetLive(safetyEnv, false)"><Icon Name="shield" Size="13" /> Back to the sandbox</button>
+                        }
+                        else if (!safetyEnv.Protected)
+                        {
+                            <button class="btn small @(confirmKey == "live:" + safetyEnv.Name ? "confirm" : "")" title="Let apps started on this environment reach its real servers"
+                                    @onclick="@(() => Confirm("live:" + safetyEnv.Name, () => SetLive(safetyEnv, true)))">
+                                @(confirmKey == "live:" + safetyEnv.Name ? $"Click again: real servers of {safetyEnv.Name}" : "Allow real servers")
+                            </button>
+                        }
+                    </div>
+                }
+
+                @if (repo is not null)
+                {
+                @if (!locked && safetyEnv is not null)
+                {
+                    <div class="preflight">
+                        <b>Before you run</b>
+                        @if (safetyEnv.Protected)
+                        {
+                            <span class="flow-meta">@safetyEnv.Name is protected, so its systems are not checked.</span>
+                        }
+                        else if (preflight is null)
+                        {
+                            <span class="flow-meta">@(preflightRunning ? "Checking which systems answer…" : "Not checked yet.")</span>
+                        }
+                        else if (preflight.Count == 0)
+                        {
+                            <span class="flow-meta">No setting on @envName points at another system.</span>
+                        }
+                        else
+                        {
+                            @foreach (var system in preflight)
+                            {
+                                <span class="pre-chip @(system.Up ? "up" : "down")" title="@($"{system.Host}:{system.Port}" + (system.Up ? $", answered in {system.Ms} ms" : ", no answer"))">
+                                    <span class="pre-dot"></span>@system.Names<i>@(system.Up ? "answering" : "not answering")</i>
+                                </span>
+                            }
+                        }
+                        @if (targets.SelectMany(t => t.Requires).Distinct(StringComparer.OrdinalIgnoreCase).Where(k => !vars.Any(x => x.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList() is { Count: > 0 } gone)
+                        {
+                            <span class="pre-chip down" title="@string.Join(", ", gone)"><span class="pre-dot"></span>@gone.Count setting@(gone.Count == 1 ? "" : "s") missing</span>
+                        }
+                        <span class="spacer"></span>
+                        @if (!safetyEnv.Protected)
+                        {
+                            <button class="btn small" disabled="@preflightRunning" @onclick="() => CheckSystems(force: true)"><Icon Name="refresh" Size="12" /> Check again</button>
+                        }
+                    </div>
+                }
+                <section class="targets">
+                    @if (targets.Count == 0)
+                    {
+                        <div class="panel">
+                            <div class="state">
+                                <span class="glyph"><Icon Name="terminal" Size="22" /></span>
+                                <h3>No run targets found</h3>
+                                <p>No runnable .NET project or npm dev script was detected in this folder.</p>
+                            </div>
+                        </div>
+                    }
+                    @foreach (var t in targets)
+                    {
+                        var live = sessions.FirstOrDefault(s => s.Running && s.Repo == repo.Name && s.Target == t.Name);
+                        var missing = locked ? [] : t.Requires.Where(k => !vars.Any(v => v.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList();
+                        <article class="target-card @(live is not null ? "live" : "")">
+                            <div class="target-icon kind-@t.Kind">@(t.Kind == "dotnet" ? ".NET" : t.Kind == "node" ? "npm" : ">_")</div>
+                            <div class="target-body">
+                                <div class="target-title">
+                                    @t.Name
+                                    @if (t.Name.Equals(repo.DefaultTarget, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <span class="badge accent">default</span>
+                                    }
+                                </div>
+                                <div class="target-sub">
+                                    @(t.Kind == "dotnet" ? t.Project : t.Kind == "node" ? $"npm run {t.Script}" : $"{t.Command} {string.Join(' ', t.Args)}")
+                                    @if (t.Companions.Count > 0)
+                                    {
+                                        <span> · with @string.Join(", ", t.Companions)</span>
+                                    }
+                                </div>
+                                @if (missing.Count > 0)
+                                {
+                                    <div class="target-warn"><Icon Name="alert" Size="14" /> @envName is missing @string.Join(", ", missing)</div>
+                                }
+                                @if (live?.Sandbox is not null)
+                                {
+                                    @SandboxFacts(live)
+                                }
+                                else if (live is null && safetyEnv is { Live: false } && (t.Kind != "dotnet" || t.Companions.Count > 0))
+                                {
+                                    <div class="target-warn" title="RepoRunner can only fence in .NET apps.">
+                                        <Icon Name="alert" Size="14" />
+                                        @(t.Kind != "dotnet" ? "Not a .NET app, so it cannot be sandboxed: it reaches whatever its settings point at." : $"{string.Join(", ", t.Companions)} start alongside and are not sandboxed.")
+                                    </div>
+                                }
+                                @if (t.Kind == "dotnet" && solutions.Count > 1)
+                                {
+                                    <label class="solution-pick" title="Rider attaches in the window that has this solution open. Pick the one you work in.">
+                                        <Icon Name="bug" Size="13" /> Debug with
+                                        <select value="@SolutionOf(t)" @onchange="e => SetSolution(t, e.Value?.ToString())">
+                                            @foreach (var sln in solutions)
+                                            {
+                                                <option value="@sln">@sln@(openInRider.Contains(sln) ? "  (open in Rider)" : "")</option>
+                                            }
+                                        </select>
+                                    </label>
+                                }
+                            </div>
+                            <div class="target-actions">
+                                @if (live is not null)
+                                {
+                                    <span class="live-pill"><span class="pulse"></span> @live.Env · @Elapsed(live)</span>
+                                    @if (live.Url is not null)
+                                    {
+                                        <a class="btn" href="@live.Url" target="_blank" rel="noopener noreferrer" onclick="window.open(this.href, '_blank', 'noopener'); return false;">Open app <Icon Name="external" Size="14" /></a>
+                                    }
+                                    <button class="btn stop" @onclick="() => StopSession(live)"><Icon Name="stop" Size="12" /> Stop</button>
+                                }
+                                else
+                                {
+                                    <button class="btn @(IsConfirming(t, "Run") ? "confirm" : "run")" @onclick="@(() => Run(t, "Run"))">
+                                        <Icon Name="play" Size="12" /> @RunLabel(t, "Run")
+                                    </button>
+                                    @if (t.Kind == "dotnet")
+                                    {
+                                        <button class="btn @(IsConfirming(t, "Debug") ? "confirm" : "")" title="Start paused and attach Rider's debugger" @onclick="@(() => Run(t, "Debug"))">
+                                            <Icon Name="bug" Size="15" /> @RunLabel(t, "Debug")
+                                        </button>
+                                        <button class="btn @(IsConfirming(t, "Watch") ? "confirm" : "")" title="dotnet watch: rebuilds when files change" @onclick="@(() => Run(t, "Watch"))">
+                                            <Icon Name="refresh" Size="14" /> @RunLabel(t, "Watch")
+                                        </button>
+                                    }
+                                }
+                            </div>
+                        </article>
+                    }
+                </section>
+                }
+
+        </div>
     };
 
     private void ShowTab(string key)
