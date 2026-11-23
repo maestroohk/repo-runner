@@ -305,7 +305,7 @@ public sealed partial class CodeIndex
 
     private CodeNode TraceMethod(TypeInfo owner, MethodInfo method, HashSet<string> path, int depthLeft, ref int budget)
     {
-        var key = owner.Name + "." + method.Name;
+        var key = owner.Name + "." + method.Name + "/" + method.Parameters; // overloads are different methods
         var node = new CodeNode
         {
             Kind = "method",
@@ -393,8 +393,9 @@ public sealed partial class CodeIndex
 
         // A call to another system named by an endpoint enum, e.g. Http.GetData(path, HttpEndPoints.OPSAPI).
         if (arguments.FirstOrDefault(a => a is MemberAccessExpressionSyntax m && EndpointEnum().IsMatch(m.Expression.ToString())) is MemberAccessExpressionSyntax system
-            && arguments.FirstOrDefault(a => a is LiteralExpressionSyntax or InterpolatedStringExpressionSyntax or BinaryExpressionSyntax
-                || a is IdentifierNameSyntax id && values.ContainsKey(id.Identifier.Text)) is { } address)
+            // The address is the argument that is written out (a literal or built string); a variable only if none is.
+            && (arguments.FirstOrDefault(a => a is LiteralExpressionSyntax { RawKind: (int)SyntaxKind.StringLiteralExpression } or InterpolatedStringExpressionSyntax or BinaryExpressionSyntax)
+                ?? arguments.FirstOrDefault(a => a is IdentifierNameSyntax id && values.ContainsKey(id.Identifier.Text))) is { } address)
             return Leaf("http", system.Name.Identifier.Text, Address(owner, address, values), method, invocation, VerbOf(name, arguments));
 
         // A call into this repo's own code is followed; anything else is kept only if it leaves the process.

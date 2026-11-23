@@ -130,7 +130,7 @@
                 }
                 <li class="beat you">
                     <span class="beat-n">@(n + 1)</span>
-                    <div><b>@(Process.Kind == "endpoint" ? "The answer goes back to whoever called." : "The page shows you the result.")</b></div>
+                    <div><b>@(Process.Kind == "endpoint" ? "The answer goes back to whoever called." : Process.Kind == "worker" ? "The job is done until the next round." : "The page shows you the result.")</b></div>
                 </li>
             </ol>
         </section>

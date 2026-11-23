@@ -52,7 +52,7 @@ public sealed class ProcessMap
 public static partial class Discovery
 {
     /// <summary>Goes up when what a scan finds changes shape, so maps saved by an older RepoRunner are made again.</summary>
-    public const int FormatVersion = 3;
+    public const int FormatVersion = 4;
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
 
@@ -69,8 +69,14 @@ public static partial class Discovery
             var steps = new List<ProcessStep>();
             foreach (var (owner, part, entry) in Parts(code, feature, type))
             {
-                var trace = code.Trace(owner, entry);
-                if (trace is null) continue;
+                var whole = code.Trace(owner, entry);
+                if (whole is null) continue;
+                // A background job's loop calls one job after another: each is a step of its own (and the loop itself is not).
+                var jobs = feature.Kind == "worker" ? whole.Children.Where(c => c.Kind == "method" && c.All().Any(n => n.Kind is "sp" or "http" or "db")).ToList() : [];
+                foreach (var trace in jobs.Count > 1 ? jobs : [whole])
+                {
+                // "NssfGoClaimsMonitorProcessor.RunMonitor" → "Nssf go claims monitor": the class says what the job is.
+                var job = jobs.Count > 1 ? Words(Strip(trace.Title.Split('.')[0], "Processor", "Service", "Job", "Worker")) : null;
                 var touches = trace.All().Where(n => n.Kind is "sp" or "http" or "env" or "config" or "db")
                     .Select(n => new Touch(n.Kind, n.Title, n.Detail, Changes(n), n.File ?? feature.File, n.Line, n.Verb))
                     .DistinctBy(t => (t.Kind, t.Title, t.Detail))
@@ -79,16 +85,19 @@ public static partial class Discovery
                 // call that carries it, whose address the code builds at run time, adds nothing.
                 if (touches.Any(t => t.Kind == "sp"))
                 {
-                    var carrier = touches.FirstOrDefault(t => t.AddressUnknown && t.Title.All(c => char.IsUpper(c) || c == '_' || char.IsDigit(c)))?.Title;
+                    // The carrier: a call whose address is built at run time, or the other system's generic runner (Generic/Execute…).
+                    bool Carries(Touch t) => t.Kind == "http" && (t.AddressUnknown || t.Detail is { } d && GenericRunner().IsMatch(d));
+                    var carrier = touches.FirstOrDefault(t => Carries(t) && t.Title.All(c => char.IsUpper(c) || c == '_' || char.IsDigit(c)))?.Title;
                     if (carrier is not null)
                         touches = touches.Select(t => t.Kind == "sp" ? t with { Via = carrier } : t).ToList();
-                    touches.RemoveAll(t => t.AddressUnknown || t.Kind == "db");
+                    touches.RemoveAll(t => Carries(t) || t.AddressUnknown || t.Kind == "db");
                 }
                 // Steps that reach nothing outside the app (toggling a panel, sorting a list) are left out; an
                 // endpoint is kept whatever it does, since other apps call it.
                 if (feature.Kind != "endpoint" && (touches.Count == 0 || touches.All(t => t.Kind is "env" or "config") && !IsLifecycle(entry))) continue;
-                var title = StepTitle(feature, entry, part is not null);
-                steps.Add(new ProcessStep(entry, part is null ? title : $"{part}: {char.ToLowerInvariant(title[0])}{title[1..]}", touches, trace.File ?? feature.File, trace.Line));
+                var title = job ?? StepTitle(feature, entry, part is not null);
+                steps.Add(new ProcessStep(job is null ? entry : trace.Title.Split('.')[^1], part is null ? title : $"{part}: {char.ToLowerInvariant(title[0])}{title[1..]}", touches, trace.File ?? feature.File, trace.Line));
+                }
             }
             if (steps.Count == 0) continue;
             processes.Add(new FoundProcess(KeyOf(feature), AreaOf(feature), NameOf(feature), feature.Kind, feature.Verb, feature.Route,
@@ -254,7 +263,7 @@ public static partial class Discovery
          "assign", "reassign", "cancel", "close", "post", "upload", "send", "register", "finalize", "publish", "review", "edit", "change", "reset", "activate", "deactivate"];
 
     private static readonly string[] ReadWords =
-        ["get", "select", "check", "search", "list", "find", "fetch", "validate", "count", "load", "view", "read", "verify", "lookup", "is", "has", "download", "paired", "report"];
+        ["get", "select", "check", "search", "list", "find", "fetch", "validate", "count", "load", "view", "read", "verify", "lookup", "is", "has", "download", "paired", "report", "stats", "pending", "volume"];
 
     /// <summary>What a procedure's or address's own words say it does. Null when they do not say.</summary>
     private static bool? NameSays(string name)
@@ -267,6 +276,9 @@ public static partial class Discovery
         var reads = Has(ReadWords);
         return changes == reads ? null : changes;
     }
+
+    [GeneratedRegex(@"(^|/)Generic/Execute\w*$", RegexOptions.IgnoreCase)]
+    private static partial Regex GenericRunner();
 
     public static bool IsPlaceholder(string text) => Placeholder().IsMatch(text);
 
