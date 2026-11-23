@@ -40,6 +40,8 @@ public static partial class FlowRules
     /// </summary>
     public static string? Failure(Flow flow)
     {
+        // A step that failed only because the sandbox refused a connection is the sandbox working, not a failure to keep.
+        if (flow.Errors.Any(e => e.Message.Contains("RepoRunner sandbox", StringComparison.Ordinal))) return null;
         foreach (var step in flow.Steps.Values.Where(s => s.Category == "http").OrderBy(s => s.Start))
         {
             flow.Bodies.TryGetValue(step.Id, out var body);

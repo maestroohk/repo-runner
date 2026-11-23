@@ -28,7 +28,7 @@ Design document: https://claude.ai/artifact/MSdACk61ieiLPEfTYhRUKN
 A .NET app started on an environment that is not live runs fenced in:
 
 - **Lookups** (calls whose names say they only read: Get, Search, List...) go to the real server, so the app has
-  its data and your access.
+  its data and your access. Protected environments (PROD) are the exception: nothing is read from them either.
 - **Changes** (save, approve, send, delete, or anything whose name does not say) never leave this computer. The
   app gets an answer it can read, and nothing happens anywhere.
 - **Direct connections** to databases, Redis and other systems are refused before they are made. Microsoft

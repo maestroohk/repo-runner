@@ -239,12 +239,22 @@
                             }
                             else
                             {
-                                <b>Sandbox: nothing you save, approve or send leaves this computer.</b>
+                                <b>@(safetyEnv.Protected ? "Sandbox: nothing leaves this computer." : "Sandbox: nothing you save, approve or send leaves this computer.")</b>
+                                @if (safetyEnv.Protected)
+                                {
+                                    <span>
+                                        @safetyEnv.Name is protected, so a .NET app started on it reaches none of its servers, not even to look things up.
+                                        RepoRunner answers every call itself, from your recordings or with made-up data. Only signing in to Microsoft goes out.
+                                    </span>
+                                }
+                                else
+                                {
                                 <span>
                                     When you start a .NET app on @safetyEnv.Name, it can still look things up on @(safetyEnv.Name)'s servers (your access, lists,
                                     member details), so it works as usual. Anything that would save, approve, send or delete is answered by RepoRunner
                                     itself: “accepted”, and nothing happens. Direct connections to databases and other systems are refused.
                                 </span>
+                                }
                             }
                         </div>
                         @if (safetyEnv.Live)
@@ -3856,7 +3866,8 @@
                 var recordings = await Task.Run(() => Recordings.List(current));
                 server = await SandboxServer.StartAsync(recordings, preferredRecording);
                 server.MirrorTo = CopyTarget(repo!, repos);
-                server.ReadThrough = true;
+                // A protected environment (PROD) is never read from either: its lookups get recorded or made-up answers.
+                server.ReadThrough = !env.Protected;
                 server.KeepDataIn(System.IO.Path.Combine(Vaults.Use(v => v.RecordingsFolder(current)), "sandbox-data.json"));
                 server.ReadCodeWith(CodeOf(current.Path));
             }
