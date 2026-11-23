@@ -11,6 +11,10 @@
     <script>
         // The look chosen last time, applied before the first paint. "control" (dark, map-first) or "transit" (light, story-first).
         try { document.documentElement.dataset.view = localStorage.getItem('rr-view') || 'control'; } catch (e) { document.documentElement.dataset.view = 'control'; }
+        window.rrFocus = id => { const el = document.getElementById(id); if (el) { el.focus(); el.select && el.select(); } };
+        document.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); document.getElementById('rr-palette-open')?.click(); }
+        });
         window.rrGetView = () => document.documentElement.dataset.view || 'control';
         window.rrSetView = v => { document.documentElement.dataset.view = v; try { localStorage.setItem('rr-view', v); } catch (e) { } };
     </script>

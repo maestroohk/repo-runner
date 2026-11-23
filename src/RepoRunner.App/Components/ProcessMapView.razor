@@ -151,6 +151,8 @@
 @code {
     [Parameter, EditorRequired] public FoundProcess Process { get; set; } = null!;
     [Parameter, EditorRequired] public string AppName { get; set; } = "";
+    /// <summary>Raised when a box is clicked (null when the click clears it), so the page can show its details.</summary>
+    [Parameter] public EventCallback<MapPick?> OnPick { get; set; }
     /// <summary>The name of the other system a call goes to, as the page shows it.</summary>
     [Parameter, EditorRequired] public Func<Touch, string> SystemOf { get; set; } = null!;
     /// <summary>Where a call lands in another of your repos, with what it runs there.</summary>
@@ -466,7 +468,11 @@
         if (playing) Schedule();
     }
 
-    private void Focus(string? key) => focus = focus == key ? null : key;
+    private async Task Focus(string? key)
+    {
+        focus = focus == key ? null : key;
+        await OnPick.InvokeAsync(focus is not null && plan.Nodes.TryGetValue(focus, out var node) ? new MapPick(node.Kind, node.Name) : null);
+    }
 
     private bool StepUses(ProcessStep step, Node node) => node.Kind switch
     {

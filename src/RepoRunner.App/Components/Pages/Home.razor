@@ -20,6 +20,10 @@
     <aside class="sidebar">
         <a class="brand" href="" title="All repositories"><span class="logo"><Icon Name="play" Size="12" /></span>RepoRunner</a>
 
+        <button class="palette-open" title="Search everything (Ctrl+K)" @onclick="OpenPalette">
+            <Icon Name="search" Size="13" /> <span>Search</span> <kbd>Ctrl K</kbd>
+        </button>
+
         <div class="nav-label">
             Repositories
             <button class="icon-btn" title="Add a repo" @onclick="OpenAdd"><Icon Name="plus" /></button>
@@ -280,6 +284,42 @@
 
                 @if (!showingSection || Focused)
                 {
+                @if (!locked && safetyEnv is not null)
+                {
+                    <div class="preflight">
+                        <b>Before you run</b>
+                        @if (safetyEnv.Protected)
+                        {
+                            <span class="flow-meta">@safetyEnv.Name is protected, so its systems are not checked.</span>
+                        }
+                        else if (preflight is null)
+                        {
+                            <span class="flow-meta">@(preflightRunning ? "Checking which systems answer…" : "Not checked yet.")</span>
+                        }
+                        else if (preflight.Count == 0)
+                        {
+                            <span class="flow-meta">No setting on @envName points at another system.</span>
+                        }
+                        else
+                        {
+                            @foreach (var system in preflight)
+                            {
+                                <span class="pre-chip @(system.Up ? "up" : "down")" title="@($"{system.Host}:{system.Port}" + (system.Up ? $", answered in {system.Ms} ms" : ", no answer"))">
+                                    <span class="pre-dot"></span>@system.Names<i>@(system.Up ? "answering" : "not answering")</i>
+                                </span>
+                            }
+                        }
+                        @if (targets.SelectMany(t => t.Requires).Distinct(StringComparer.OrdinalIgnoreCase).Where(k => !vars.Any(x => x.Name.Equals(k, StringComparison.OrdinalIgnoreCase))).ToList() is { Count: > 0 } gone)
+                        {
+                            <span class="pre-chip down" title="@string.Join(", ", gone)"><span class="pre-dot"></span>@gone.Count setting@(gone.Count == 1 ? "" : "s") missing</span>
+                        }
+                        <span class="spacer"></span>
+                        @if (!safetyEnv.Protected)
+                        {
+                            <button class="btn small" disabled="@preflightRunning" @onclick="() => CheckSystems(force: true)"><Icon Name="refresh" Size="12" /> Check again</button>
+                        }
+                    </div>
+                }
                 <section class="targets">
                     @if (targets.Count == 0)
                     {
@@ -1545,6 +1585,33 @@
     </main>
 </div>
 
+<button id="rr-palette-open" class="visually-hidden" tabindex="-1" aria-hidden="true" @onclick="OpenPalette"></button>
+@if (paletteOpen)
+{
+    var hits = PaletteHits();
+    <div class="palette-backdrop" @onclick="ClosePalette">
+        <div class="palette" role="dialog" aria-label="Search everything" @onclick:stopPropagation="true">
+            <input id="rr-palette-input" class="palette-input" placeholder="A page, a stored procedure, a setting, a recording…" autocomplete="off"
+                   @bind="paletteQuery" @bind:event="oninput" @onkeydown="PaletteKey" />
+            <div class="palette-results">
+                @if (hits.Count == 0)
+                {
+                    <div class="palette-empty">Nothing matches “@paletteQuery”.</div>
+                }
+                @for (var i = 0; i < hits.Count; i++)
+                {
+                    var hit = hits[i];
+                    <a class="palette-item @(i == Math.Min(paletteIndex, hits.Count - 1) ? "active" : "")" href="@hit.Url" @onclick="ClosePalette">
+                        <span class="palette-kind">@hit.Kind</span>
+                        <span class="palette-title">@hit.Title</span>
+                        <span class="palette-sub">@hit.Sub</span>
+                    </a>
+                }
+            </div>
+            <div class="palette-foot">↑ ↓ to move · Enter to open · Esc to close</div>
+        </div>
+    </div>
+}
 @if (message is not null)
 {
     <div class="toast @(messageIsError ? "error" : "ok")" role="status">
@@ -1785,6 +1852,11 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (paletteFocus)
+        {
+            paletteFocus = false;
+            try { await JS.InvokeVoidAsync("rrFocus", "rr-palette-input"); } catch (JSException) { }
+        }
         if (firstRender)
         {
             try
@@ -1858,6 +1930,98 @@
         });
         files = FindFiles(current);
         if (shown is null || shown.Repo != current.Name) shown = RepoSessions.LastOrDefault();
+        _ = CheckSystems();
+    }
+
+    // ---------- before you run ----------
+
+    private List<Preflight.Result>? preflight;
+    private string? preflightKey;
+    private bool preflightRunning;
+
+    /// <summary>Asks each system the settings point at whether it is answering. Once per repo and environment, or on request.</summary>
+    private async Task CheckSystems(bool force = false)
+    {
+        if (repo is null || locked) return;
+        var key = $"{repo.Id}|{envName}";
+        if (!force && key == preflightKey) return;
+        preflightKey = key;
+        preflight = null;
+        if (CurrentEnv.Protected) return; // nothing of a protected environment is touched
+        preflightRunning = true;
+        var results = await Preflight.Check(Preflight.TargetsOf(vars));
+        if (preflightKey != key) return;
+        (preflight, preflightRunning) = (results, false);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // ---------- search everything ----------
+
+    private sealed record PaletteHit(string Kind, string Title, string Sub, string Url);
+
+    private bool paletteOpen, paletteFocus;
+    private string paletteQuery = "";
+    private int paletteIndex;
+
+    private void OpenPalette() => (paletteOpen, paletteFocus, paletteQuery, paletteIndex) = (true, true, "", 0);
+
+    private void ClosePalette() => paletteOpen = false;
+
+    private void PaletteKey(KeyboardEventArgs e)
+    {
+        var hits = PaletteHits();
+        switch (e.Key)
+        {
+            case "Escape": ClosePalette(); break;
+            case "ArrowDown": paletteIndex = Math.Min(paletteIndex + 1, Math.Max(0, hits.Count - 1)); break;
+            case "ArrowUp": paletteIndex = Math.Max(0, paletteIndex - 1); break;
+            case "Enter" when hits.Count > 0:
+                var chosen = hits[Math.Min(paletteIndex, hits.Count - 1)];
+                ClosePalette();
+                Nav.NavigateTo(chosen.Url);
+                break;
+            default: if (e.Key.Length == 1 || e.Key == "Backspace") paletteIndex = 0; break;
+        }
+    }
+
+    /// <summary>Repositories, processes, stored procedures, settings and recordings whose names hold every word typed.</summary>
+    private List<PaletteHit> PaletteHits()
+    {
+        var words = paletteQuery.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        bool Has(params string?[] texts) => words.All(w => texts.Any(t => t?.Contains(w, StringComparison.OrdinalIgnoreCase) == true));
+        var hits = new List<PaletteHit>();
+        foreach (var r in repos.Where(r => Has(r.Name, r.Path)))
+            hits.Add(new("Repository", r.Name, r.Path, UrlFor(r)));
+        if (words.Length == 0) return hits;
+
+        foreach (var r in repos)
+        {
+            if (Found.For(r).Map is not { } map) continue;
+            foreach (var p in map.Processes.Where(p => Has(p.Name, p.Area, p.Route)).Take(8))
+                hits.Add(new(p.Kind == "endpoint" ? "API" : p.Kind == "page" ? "Page" : "Job", p.Name, $"{r.Name} · {p.Area}", UrlFor(r, "found", FoundSlug(p.Key))));
+            foreach (var group in map.Processes.SelectMany(p => p.Touches.Where(t => t.Kind == "sp" && Has(t.Title)).Select(t => (t.Title, Process: p)))
+                         .GroupBy(x => x.Title).Take(8))
+                hits.Add(new("Procedure", group.Key, $"{r.Name} · used by {group.Select(x => x.Process.Key).Distinct().Count()} process(es), e.g. {group.First().Process.Name}",
+                    UrlFor(r, "found", FoundSlug(group.First().Process.Key))));
+            foreach (var group in map.Processes.SelectMany(p => p.Touches.Where(t => t.Kind is "env" or "config" && Has(t.Title)).Select(t => (t.Title, Process: p)))
+                         .GroupBy(x => x.Title).Take(5))
+                hits.Add(new("Setting", group.Key, $"{r.Name} · read by {group.Select(x => x.Process.Key).Distinct().Count()} process(es)", UrlFor(r, "vars")));
+        }
+        if (repo is not null)
+            foreach (var p in saved.Where(p => Has(p.Name, p.Reason)).Take(5))
+                hits.Add(new(p.IsFailure ? "Kept failure" : "Recording", p.Name, $"{repo.Name} · {p.Created:d MMM HH:mm} on {p.Env}", UrlFor(repo, "processes", p.Id)));
+        return hits.Take(14).ToList();
+    }
+
+    /// <summary>The role chosen for each repo's sandbox runs, kept while RepoRunner is open.</summary>
+    private static readonly Dictionary<string, string> runAs = new(StringComparer.OrdinalIgnoreCase);
+
+    private void RunAs(RunSession session, string? role)
+    {
+        if (string.IsNullOrEmpty(role) || session.Sandbox is null) return;
+        session.Sandbox.RunAs(role);
+        lock (runAs) runAs[session.Repo] = role;
+        Say($"From the next sign-in you are {session.Sandbox.RoleName(role)}. Sign out of the app and choose the system again.");
     }
 
     private List<FileItem> FindFiles(RepoInfo current)
@@ -3895,6 +4059,9 @@
                 server.ReadThrough = !env.Protected;
                 server.KeepDataIn(System.IO.Path.Combine(Vaults.Use(v => v.RecordingsFolder(current)), "sandbox-data.json"));
                 server.ReadCodeWith(CodeOf(current.Path));
+                string? role;
+                lock (runAs) runAs.TryGetValue(current.Name, out role);
+                if (role is not null) server.RunAs(role);
             }
             shown = Sessions.Start(Vaults, repo!, env, target, watch: mode == "Watch", debug: mode == "Debug", sandbox: server);
             tab = "output";
@@ -3992,6 +4159,17 @@
             {
                 <span class="fact" title="Connections to Microsoft sign-in, the only place a sandboxed app may reach">Sign-in <b>@signIns</b></span>
             }
+            @{ var roles = session.Sandbox.Roles; }
+            <label class="run-as" title="The role made-up sign-ins give you. Pick one seen in your recordings or type any role code, then sign out of the app and back in.">
+                Run as
+                <input list="roles-@session.Id" value="@roles.FirstOrDefault()" placeholder="role code" @onchange="e => RunAs(session, e.Value?.ToString()?.Trim())" />
+                <datalist id="roles-@session.Id">
+                    @foreach (var role in roles.Take(40))
+                    {
+                        <option value="@role">@session.Sandbox.RoleName(role)</option>
+                    }
+                </datalist>
+            </label>
             @if (hits.Count > 0 || refused.Count > 0)
             {
                 <details class="more">

@@ -149,6 +149,20 @@ else
         }
         else
         {
+        <div class="room">
+        <nav class="room-list" aria-label="Processes">
+            @foreach (var group in map.Processes.GroupBy(p => p.Area))
+            {
+                <div class="room-area">@group.Key</div>
+                @foreach (var p in group)
+                {
+                    <button class="room-item @(p.Key == open.Key ? "active" : "")" @onclick="() => OnOpen.InvokeAsync(p.Key)">
+                        <span>@p.Name</span><span class="room-count">@p.Steps.Count</span>
+                    </button>
+                }
+            }
+        </nav>
+        <div class="room-main">
         <header class="disc-head">
             <span class="kind kind-@open.Kind">@KindWord(open)</span>
             <div>
@@ -166,7 +180,7 @@ else
             </div>
         </div>
 
-        <ProcessMapView Process="open" AppName="@Repo.Name" SystemOf="SystemName" Follow="Follow" />
+        <ProcessMapView Process="open" AppName="@Repo.Name" SystemOf="SystemName" Follow="Follow" OnPick="p => pick = p" />
 
         <h4 class="disc-steps-title">Every step in detail</h4>
         <ol class="disc-steps">
@@ -261,6 +275,82 @@ else
                 </li>
             }
         </ol>
+        </div>
+        <aside class="room-side">
+            <div class="room-label">Selected</div>
+            @if (pick is null)
+            {
+                <p class="flow-meta">Click a box on the map to see what it is, who else uses it and where it is called.</p>
+            }
+            else if (pick.Kind is "sp" or "db")
+            {
+                var uses = open.Steps.SelectMany(st => st.Touches.Where(t => t.Kind == "sp" && t.Title == pick.Name).Select(t => (Step: st, Touch: t))).ToList();
+                var others = UsedElsewhere(map, open, pick.Name);
+                var first = uses.Select(u => u.Touch).FirstOrDefault();
+                <div class="mono room-name">@pick.Name</div>
+                <div class="room-badges">
+                    @ChangeBadge(first?.Changes)
+                    @if (first?.Via is { } via)
+                    {
+                        <span class="badge">run through @SystemWord(via)</span>
+                    }
+                    else if (first is null)
+                    {
+                        <span class="badge">run inside the other system</span>
+                    }
+                </div>
+                @if (uses.Count > 0)
+                {
+                    <div class="room-label">Where it is called</div>
+                    @foreach (var u in uses.DistinctBy(u => (u.Touch.File, u.Touch.Line)).Take(6))
+                    {
+                        <div class="room-row"><span class="mono">@ShortFile(u.Touch.File):@u.Touch.Line</span><span class="flow-meta">@u.Step.Title</span></div>
+                    }
+                }
+                <div class="room-label">Used by @others.Count other process@(others.Count == 1 ? "" : "es")</div>
+                @foreach (var o in others.Take(8))
+                {
+                    <a href="" @onclick="() => OnOpen.InvokeAsync(o.Key)" @onclick:preventDefault>@o.Name</a>
+                }
+                @if (others.Count > 8)
+                {
+                    <span class="flow-meta">and @(others.Count - 8) more</span>
+                }
+            }
+            else if (pick.Kind == "system")
+            {
+                var calls = open.Steps.SelectMany(st => st.Touches.Where(t => t.Kind == "http" && SystemName(t) == pick.Name)).DistinctBy(t => (t.Verb, t.Detail)).ToList();
+                var elsewhere = map.Processes.Count(p => p.Key != open.Key && p.Touches.Any(t => t.Kind == "http" && SystemName(t) == pick.Name));
+                <div class="room-name">@pick.Name</div>
+                <div class="room-badges"><span class="badge">another system</span><span class="badge">@elsewhere other process@(elsewhere == 1 ? "" : "es") call it</span></div>
+                <div class="room-label">What this process asks it</div>
+                @foreach (var t in calls.Take(10))
+                {
+                    <div class="room-row">
+                        <span class="mono">@(t.Verb is null ? "" : t.Verb + " ")@(t.AddressUnknown ? "address worked out when it runs" : Trim(t.Detail))</span>
+                        @ChangeBadge(t.Changes)
+                    </div>
+                }
+            }
+            else if (pick.Kind == "settings")
+            {
+                <div class="room-name">Settings</div>
+                <div class="room-label">Read by this process</div>
+                <div class="beat-chips">
+                    @foreach (var t in settings)
+                    {
+                        var gone = t.Kind == "env" && KnownSettings is not null && !KnownSettings.Contains(t.Title);
+                        <span class="setting @(gone ? "missing" : "")" title="@(gone ? $"Not set on {EnvName}" : "")">@t.Title</span>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="room-name">@pick.Name</div>
+                <p class="flow-meta">@(pick.Kind == "person" ? "Whoever starts this: a person in the browser, or another app calling the API." : $"{open.Area}. Its steps are listed under the map.")</p>
+            }
+        </aside>
+        </div>
         }
         <p class="flow-meta disc-foot">
             Found by reading the code. Calls whose procedure or address is decided while the app runs show only as far as the code spells them out.
@@ -283,6 +373,16 @@ else
     [Parameter] public EventCallback<string?> OnOpen { get; set; }
     [Parameter] public EventCallback OnRescan { get; set; }
     [Parameter, EditorRequired] public Func<string, string, string> LinkTo { get; set; } = null!;
+
+    private MapPick? pick;
+    private string? pickFor;
+
+    protected override void OnParametersSet()
+    {
+        if (pickFor == OpenKey) return;
+        pickFor = OpenKey;
+        pick = null;
+    }
 
     private string search = "";
     private bool showWhole;

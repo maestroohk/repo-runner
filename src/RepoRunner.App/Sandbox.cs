@@ -430,6 +430,32 @@ public sealed partial class SandboxServer : IAsyncDisposable
 
     public int Kept { get { lock (_taught) return _taught.Count; } }
 
+    /// <summary>The roles seen in recordings and code. The first is the one made-up sign-ins give you.</summary>
+    public List<string> Roles
+    {
+        get { lock (_pool) return _pool.TryGetValue("rolecode", out var list) ? list.ToList() : []; }
+    }
+
+    /// <summary>A role's name as recordings spell it out ("Customer Service Officer"), or the code itself.</summary>
+    public string RoleName(string code)
+    {
+        lock (_pool) return _rows.TryGetValue(("rolecode", code), out var row) && row.TryGetValue("rolename", out var name) ? name : code;
+    }
+
+    /// <summary>Makes made-up sign-ins give this role from now on. Answers already made up are made again.</summary>
+    public void RunAs(string role)
+    {
+        lock (_pool)
+            foreach (var key in new[] { "rolecode", "role" })
+            {
+                // A role nobody recorded can be typed in: it goes first all the same.
+                if (!_pool.TryGetValue(key, out var list)) _pool[key] = list = [];
+                list.Remove(role);
+                list.Insert(0, role);
+            }
+        lock (_madeUp) _madeUp.Clear();
+    }
+
     private static string Norm(string field)
     {
         var f = field.ToLowerInvariant();
