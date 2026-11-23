@@ -69,6 +69,13 @@
             </div>
         }
 
+        <div class="view-switch" role="group" aria-label="Look">
+            <span class="nav-label">Look</span>
+            <div class="seg">
+                <button class="seg-opt @(view == "control" ? "active" : "")" title="Dark and dense, the map in the middle" @onclick="@(() => SetView("control"))">Control room</button>
+                <button class="seg-opt @(view == "transit" ? "active" : "")" title="Light and told as a story, stop by stop" @onclick="@(() => SetView("transit"))">Transit line</button>
+            </div>
+        </div>
         <div class="sidebar-foot">
             <div class="vault-pill" title="@Vaults.VaultFile"><Icon Name="shield" /> Vault encrypted</div>
             @if (unlocked.Count > 0)
@@ -436,7 +443,7 @@
                         }
                         @if (tab == "found")
                         {
-                            <ProcessesView Repo="repo" Entry="Found.For(repo)" Others="OtherMaps()" EnvName="@envName"
+                            <ProcessesView View="@view" Repo="repo" Entry="Found.For(repo)" Others="OtherMaps()" EnvName="@envName"
                                            KnownSettings="@(locked ? null : vars.Select(v => v.Name).ToHashSet(StringComparer.OrdinalIgnoreCase))"
                                            OpenKey="@foundKey" OnOpen="OpenFound" OnRescan="() => Found.Rescan(repo)"
                                            LinkTo="@((name, key) => repos.FirstOrDefault(r => r.Name == name) is { } other ? UrlFor(other, "found", FoundSlug(key)) : "")" />
@@ -1767,8 +1774,26 @@
         }
     }
 
+    /// <summary>Which look is on: "control" (dark, map-first) or "transit" (light, told stop by stop). Kept by the browser.</summary>
+    private string view = "control";
+
+    private async Task SetView(string chosen)
+    {
+        view = chosen;
+        await JS.InvokeVoidAsync("rrSetView", chosen);
+    }
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (firstRender)
+        {
+            try
+            {
+                var saved = await JS.InvokeAsync<string>("rrGetView");
+                if (saved is "control" or "transit" && saved != view) { view = saved; StateHasChanged(); }
+            }
+            catch (JSException) { }
+        }
         // Keep the address in step with the screen, so Back, Forward and bookmarks work.
         if (!Focused)
         {

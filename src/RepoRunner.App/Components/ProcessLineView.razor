@@ -1,0 +1,248 @@
+@* The "Transit line" look: a process drawn as a line with stops, and the chosen stop told in plain sentences.
+   Written so someone who has never seen the code can follow what happens and what it touches. *@
+
+<div class="line-view">
+    <header class="line-hero">
+        <div class="line-hero-text">
+            <span class="line-eyebrow">@Process.Area</span>
+            <h2>@Process.Name</h2>
+            <p>
+                @Process.Steps.Count stop@(Process.Steps.Count == 1 ? "" : "s")
+                @if (procedures.Count > 0)
+                {
+                    <span> · @procedures.Count stored procedure@(procedures.Count == 1 ? "" : "s"), @procedures.Count(p => p.Changes == true) change data</span>
+                }
+                @if (systems.Count > 0)
+                {
+                    <span> · calls @string.Join(", ", systems.Select(s => s.Name))</span>
+                }
+            </p>
+        </div>
+        <div class="line-hero-actions">
+            <button class="btn" disabled="@(current <= 0)" @onclick="() => Go(current - 1)"><Icon Name="prev" Size="14" /> Previous stop</button>
+            <button class="btn primary" disabled="@(current >= Process.Steps.Count - 1)" @onclick="() => Go(current + 1)">Next stop <Icon Name="next" Size="14" /></button>
+        </div>
+    </header>
+
+    <section class="line-ribbon" aria-label="The stops of this process">
+        <div class="line-track" style="min-width: @(Math.Max(640, Process.Steps.Count * 132))px">
+            @for (var i = 0; i < Process.Steps.Count; i++)
+            {
+                var index = i;
+                var step = Process.Steps[i];
+                var changes = Changes(step);
+                var last = i == Process.Steps.Count - 1;
+                <button class="line-stop @(index == current ? "active" : "") @(changes ? "changes" : "")" title="@step.Title" @onclick="() => Go(index)">
+                    <span class="line-rail">
+                        <span class="line-seg @(i == 0 ? "none" : Changes(Process.Steps[i - 1]) ? "changes" : "")"></span>
+                        <span class="line-dot @(last && changes ? "end" : "")"></span>
+                        <span class="line-seg @(last ? "none" : changes ? "changes" : "")"></span>
+                    </span>
+                    <span class="line-label">@(index + 1) · @Short(StopName(step), 22)</span>
+                </button>
+            }
+        </div>
+        <div class="line-legend">
+            <span><i class="seg"></i> only looks things up</span>
+            <span><i class="seg changes"></i> changes data (held back in the sandbox)</span>
+        </div>
+    </section>
+
+    <div class="line-body">
+        <section class="line-story">
+            <div class="line-story-head">
+                <h3>Stop @(current + 1) · @StopName(Stop)</h3>
+                <span class="flow-meta mono" title="Where this starts in the code">@System.IO.Path.GetFileName(Stop.File):@Stop.Line</span>
+            </div>
+            <ol class="line-beats">
+                <li class="beat you">
+                    <span class="beat-n">1</span>
+                    <div><b>@Opening(Stop)</b></div>
+                </li>
+                @{ var n = 1; }
+                @foreach (var t in Stop.Touches.Where(t => t.Kind is "http" or "sp" or "db"))
+                {
+                    n++;
+                    var link = t.Kind == "http" ? Follow?.Invoke(t) : null;
+                    var others = t.Kind == "sp" ? UsedBy(t.Title) : [];
+                    <li class="beat @(t.Changes == true ? "changes" : "reads")">
+                        <span class="beat-n">@n</span>
+                        <div>
+                            <b>@Sentence(t)</b>
+                            <div class="beat-chips">
+                                @if (t.Changes == true)
+                                {
+                                    <span class="chip changes">changes data</span>
+                                }
+                                @if (t.Kind == "sp")
+                                {
+                                    <span class="mono">@t.Title</span>
+                                }
+                                else if (t.Kind == "http")
+                                {
+                                    <span class="chip system">@SystemOf(t)</span>
+                                    <span class="mono beat-address">@(t.Verb is null ? "" : t.Verb + " ")@(t.AddressUnknown ? "address worked out when it runs" : t.Detail)</span>
+                                }
+                            </div>
+                            @if (link is { } l)
+                            {
+                                <div class="beat-note">
+                                    <a href="@LinkTo(l.Repo, l.Process.Key)">Continues in @l.Repo · @l.Process.Name</a>@Inner(l.Process)
+                                </div>
+                            }
+                            @if (others.Count > 0)
+                            {
+                                <div class="beat-note">
+                                    Also used by
+                                    @foreach (var (o, i) in others.Take(3).Select((o, i) => (o, i)))
+                                    {
+                                        @(i > 0 ? ", " : " ")<a href="" @onclick="() => OnOpen.InvokeAsync(o.Key)" @onclick:preventDefault>@o.Name</a>
+                                    }
+                                    @(others.Count > 3 ? $" and {others.Count - 3} more" : "").
+                                </div>
+                            }
+                            @if (t.Changes == true)
+                            {
+                                <div class="beat-note">In the sandbox this is answered here and nothing is saved.</div>
+                            }
+                        </div>
+                    </li>
+                }
+                @{
+                    var stopSettings = Stop.Touches.Where(t => t.Kind is "env" or "config").ToList();
+                }
+                @if (stopSettings.Count > 0)
+                {
+                    n++;
+                    <li class="beat settings">
+                        <span class="beat-n">@n</span>
+                        <div>
+                            <b>It needs @(stopSettings.Count == 1 ? "this setting" : "these settings").</b>
+                            <div class="beat-chips">
+                                @foreach (var t in stopSettings)
+                                {
+                                    var missing = t.Kind == "env" && KnownSettings is not null && !KnownSettings.Contains(t.Title);
+                                    <span class="setting @(missing ? "missing" : "")">@t.Title@(missing ? $" · not set on {EnvName}" : "")</span>
+                                }
+                            </div>
+                        </div>
+                    </li>
+                }
+                <li class="beat you">
+                    <span class="beat-n">@(n + 1)</span>
+                    <div><b>@(Process.Kind == "endpoint" ? "The answer goes back to whoever called." : "The page shows you the result.")</b></div>
+                </li>
+            </ol>
+        </section>
+
+        <aside class="line-side">
+            @if (systems.Count > 0)
+            {
+                <div class="line-card">
+                    <h4>Systems it talks to</h4>
+                    @foreach (var s in systems)
+                    {
+                        <div class="line-row"><span>@s.Name</span><span class="flow-meta">@s.Calls call@(s.Calls == 1 ? "" : "s")@(s.Changes > 0 ? $", {s.Changes} change data" : "")</span></div>
+                    }
+                </div>
+            }
+            @if (settings.Count > 0)
+            {
+                var missing = KnownSettings is null ? [] : settings.Where(s => s.Kind == "env" && !KnownSettings.Contains(s.Title)).ToList();
+                <div class="line-card">
+                    <h4>Settings it needs</h4>
+                    <div class="line-row"><span>@settings.Count in all</span><span class="@(missing.Count > 0 ? "warn-text" : "ok-text")">@(KnownSettings is null ? "unlock to check" : missing.Count > 0 ? $"{missing.Count} missing on {EnvName}" : $"all set on {EnvName}")</span></div>
+                    @if (missing.Count > 0)
+                    {
+                        <div class="beat-chips">
+                            @foreach (var m in missing)
+                            {
+                                <span class="setting missing">@m.Title</span>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+            <div class="line-card dark">
+                <h4>Safe to try</h4>
+                <p>Run this from RepoRunner and nothing you save, approve or send reaches a real server. The orange stops are the ones that would change data.</p>
+            </div>
+        </aside>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public FoundProcess Process { get; set; } = null!;
+    [Parameter, EditorRequired] public string AppName { get; set; } = "";
+    [Parameter, EditorRequired] public Func<Touch, string> SystemOf { get; set; } = null!;
+    [Parameter] public Func<Touch, (string Repo, FoundProcess Process)?>? Follow { get; set; }
+    [Parameter, EditorRequired] public Func<string, List<FoundProcess>> UsedBy { get; set; } = null!;
+    [Parameter, EditorRequired] public Func<string, string, string> LinkTo { get; set; } = null!;
+    [Parameter] public EventCallback<string?> OnOpen { get; set; }
+    [Parameter] public HashSet<string>? KnownSettings { get; set; }
+    [Parameter] public string EnvName { get; set; } = "";
+
+    private int current;
+    private FoundProcess? shownFor;
+    private List<Touch> procedures = [];
+    private List<Touch> settings = [];
+    private List<(string Name, int Calls, int Changes)> systems = [];
+
+    private ProcessStep Stop => Process.Steps[Math.Clamp(current, 0, Process.Steps.Count - 1)];
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(shownFor, Process)) return;
+        shownFor = Process;
+        current = 0;
+        var touches = Process.Touches.ToList();
+        procedures = touches.Where(t => t.Kind == "sp").DistinctBy(t => t.Title).ToList();
+        settings = touches.Where(t => t.Kind is "env" or "config").DistinctBy(t => t.Title).ToList();
+        systems = touches.Where(t => t.Kind == "http").GroupBy(SystemOf)
+            .Select(g => (g.Key, g.Count(), g.Count(t => t.Changes == true))).ToList();
+    }
+
+    private void Go(int index) => current = Math.Clamp(index, 0, Process.Steps.Count - 1);
+
+    private static bool Changes(ProcessStep step) => step.Touches.Any(t => t.Changes == true);
+
+    /// <summary>"Payment details: validate bank" → "Validate bank"; the part before the colon is the page section.</summary>
+    private static string StopName(ProcessStep step)
+    {
+        var title = step.Title;
+        var cut = title.IndexOf(':');
+        var name = cut < 0 ? title : title[(cut + 1)..].Trim();
+        return name.Length == 0 ? title : char.ToUpperInvariant(name[0]) + name[1..];
+    }
+
+    private string Opening(ProcessStep step)
+    {
+        if (Process.Kind == "endpoint") return $"Another app calls {Process.Name}.";
+        if (Process.Kind == "worker") return "This runs by itself in the background.";
+        var what = StopName(step);
+        var section = step.Title.Contains(':') ? step.Title[..step.Title.IndexOf(':')].Trim() : null;
+        var where = section is null ? "" : $" on {section}";
+        if (what.StartsWith("When", StringComparison.OrdinalIgnoreCase)) return $"{what}{where}, {AppName} gets to work.";
+        foreach (var (ending, lead) in new[] { (" clicked", "You press"), (" click", "You press"), (" key down", "You type in"), (" changed", "You pick a different"), (" selected", "You pick") })
+            if (what.EndsWith(ending, StringComparison.OrdinalIgnoreCase)) return $"{lead} “{what[..^ending.Length]}”{where}.";
+        return $"You choose “{what}”{where}.";
+    }
+
+    private string Sentence(Touch t) => t.Kind switch
+    {
+        "sp" when t.Via is { } via => t.Changes == true
+            ? $"{AppName} asks {SystemOf(new Touch("http", via, null, null, "", 0))} to save something in the database."
+            : $"{AppName} asks {SystemOf(new Touch("http", via, null, null, "", 0))} to look something up in the database.",
+        "sp" => t.Changes == true ? $"{AppName} saves something in its database." : $"{AppName} looks something up in its database.",
+        "db" => $"{AppName} runs a database query decided while it runs.",
+        _ => t.Changes == true ? $"{AppName} sends {SystemOf(t)} something to change." : $"{AppName} asks {SystemOf(t)} for information.",
+    };
+
+    private static string Inner(FoundProcess process)
+    {
+        var names = process.Touches.Where(t => t.Kind == "sp").Select(t => t.Title).Distinct().Take(3).ToList();
+        return names.Count == 0 ? "." : $", which runs {string.Join(", ", names)}.";
+    }
+
+    private static string Short(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
+}

@@ -142,6 +142,13 @@ else
         var settings = open.Touches.Where(t => t.Kind is "env" or "config").DistinctBy(t => t.Title).ToList();
         var missing = settings.Where(t => t.Kind == "env" && KnownSettings is not null && !KnownSettings.Contains(t.Title)).ToList();
 
+        @if (View == "transit")
+        {
+            <ProcessLineView Process="open" AppName="@Repo.Name" SystemOf="SystemName" Follow="Follow" UsedBy="@(title => UsedElsewhere(map, open, title))"
+                             LinkTo="LinkTo" OnOpen="OnOpen" KnownSettings="KnownSettings" EnvName="@EnvName" />
+        }
+        else
+        {
         <header class="disc-head">
             <span class="kind kind-@open.Kind">@KindWord(open)</span>
             <div>
@@ -254,6 +261,7 @@ else
                 </li>
             }
         </ol>
+        }
         <p class="flow-meta disc-foot">
             Found by reading the code. Calls whose procedure or address is decided while the app runs show only as far as the code spells them out.
             To see exactly what happens with real data, record the process on the Recordings tab.
@@ -262,6 +270,8 @@ else
 }
 
 @code {
+    /// <summary>"control" shows the map and every step in detail; "transit" tells the process stop by stop.</summary>
+    [Parameter] public string View { get; set; } = "control";
     [Parameter, EditorRequired] public RepoInfo Repo { get; set; } = null!;
     [Parameter, EditorRequired] public Discoveries.Entry Entry { get; set; } = null!;
     /// <summary>Other repos' scans by repo name, to follow a call from this repo into another.</summary>
